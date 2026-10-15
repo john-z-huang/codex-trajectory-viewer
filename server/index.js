@@ -6,6 +6,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { previewFromRecord } from "../src/lib/rollout.js";
 import { readSessionSupplement, readThreadSummaries } from "./sqlite-reader.js";
+import { linkSubagents, subagentActivityFromRollout, subagentMetadataFromSession } from "./subagents.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const encodeId = (relativePath) => Buffer.from(relativePath).toString("base64url");
@@ -14,13 +15,27 @@ function mergeThreadSummary(session, row = {}) {
   const archived = row.archived == null ? session.archived : typeof row.archived === "string" ? /^(1|true|yes)$/i.test(row.archived) : Boolean(row.archived);
   const updatedAtMs = Number(row.updated_at_ms);
   const updatedAt = row.updated_at ?? (row.updated_at_ms != null && Number.isFinite(updatedAtMs) && !Number.isNaN(new Date(updatedAtMs).valueOf()) ? new Date(updatedAtMs).toISOString() : session.timestamp);
+  const titleCandidates = [
+    row.name,
+    row.title,
+    session._metadataName,
+    session._metadataTitle,
+    row.preview,
+    row.first_user_message,
+    session._initialUserMessage,
+    session.preview,
+  ];
+  const title = titleCandidates.find((candidate) => typeof candidate === "string" && candidate.trim())?.trim()
+    ?? row.title
+    ?? session.preview;
   return {
     ...Object.fromEntries(Object.entries(session).filter(([key]) => !key.startsWith("_"))),
-    title: typeof row.title === "string" && row.title.trim() ? row.title : session.preview,
+    title,
     cwd: typeof row.cwd === "string" && row.cwd ? row.cwd : session.cwd,
     model: row.model ?? null,
     tokens_used: row.tokens_used ?? null,
     source: row.source ?? null,
+    agent: session._agent ?? null,
     archived,
     updatedAt,
   };
@@ -65,14 +80,14 @@ export async function discoverSessions(home) {
         try {
           const record = JSON.parse(line);
           firstTimestamp ??= record.timestamp ?? null;
-          if (record.type === "session_meta") metadata = record.payload ?? {};
+          if (record.type === "session_meta" || record.type === "session_meta_entry") metadata = record.payload ?? {};
           preview ||= previewFromRecord(record);
         } catch { /* malformed lines remain available in the detail view */ }
       }
       const basename = path.basename(file.candidate);
       const match = basename.match(/^rollout-(?:\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-(.+)\.jsonl$/);
       const id = metadata?.id ?? metadata?.thread_id ?? match?.[1] ?? basename;
-      sessions.push({ id: encodeId(file.relativePath), sessionId: id, archived: file.archived, preview: preview || metadata?.initial_user_message || "无用户消息预览", cwd: metadata?.cwd ?? "", timestamp: firstTimestamp ?? info.mtime.toISOString(), filename: basename, _path: resolved, _relativePath: file.relativePath });
+      sessions.push({ id: encodeId(file.relativePath), sessionId: id, archived: file.archived, preview: preview || metadata?.initial_user_message || "无用户消息预览", cwd: metadata?.cwd ?? "", timestamp: firstTimestamp ?? info.mtime.toISOString(), filename: basename, _path: resolved, _relativePath: file.relativePath, _agent: subagentMetadataFromSession(metadata), _metadataName: metadata?.name, _metadataTitle: metadata?.title, _initialUserMessage: metadata?.initial_user_message });
     } catch { /* unreadable files are skipped; discovered files remain strictly allowlisted */ }
   }
   return sessions.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
@@ -91,6 +106,18 @@ export function createAppServer(options = {}) {
       const sessions = await discoverSessions(home);
       const threads = await readThreadSummaries(sqliteHome, sessions);
       const summaries = sessions.map((session) => mergeThreadSummary(session, threads.get(String(session.sessionId))));
+      const sessionsByThreadId = new Map(summaries.map((session) => [String(session.sessionId), session]));
+      for (const session of summaries) {
+        const parentThreadId = session.agent?.parentThreadId;
+        if (!parentThreadId) continue;
+        const parent = session.agent.conflict ? null : sessionsByThreadId.get(String(parentThreadId));
+        session.projectCwd = session.cwd || parent?.cwd || "";
+        session.agent = {
+          ...session.agent,
+          parentSessionId: parent?.id ?? null,
+          parentTitle: parent?.title || parent?.preview || null,
+        };
+      }
       response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify(summaries));
       return;
     }
@@ -103,10 +130,24 @@ export function createAppServer(options = {}) {
       if (!match) { response.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Session not found" })); return; }
       const contents = await readFile(match._path, "utf8");
       const thread = (await readThreadSummaries(sqliteHome, [match])).get(String(match.sessionId));
+      const linkedSubagents = linkSubagents(match, sessions, subagentActivityFromRollout(contents));
+      const childSessions = linkedSubagents.map((link) => link.session).filter(Boolean);
+      const childThreads = await readThreadSummaries(sqliteHome, childSessions);
       const requestedHistoryPage = Number(url.searchParams.get("historyPage") ?? 1);
       const historyPage = Number.isSafeInteger(requestedHistoryPage) && requestedHistoryPage > 0 ? Math.min(requestedHistoryPage, 10_000) : 1;
       const supplement = await readSessionSupplement(sqliteHome, match, { historyPage });
-      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ ...mergeThreadSummary(match, thread), contents, supplement }));
+      const subagents = linkedSubagents.map((link) => {
+        if (!link.session) return { threadId: link.threadId, agent: link.agent, activityStatus: link.status, available: false, reason: link.reason };
+        return {
+          ...mergeThreadSummary(link.session, childThreads.get(String(link.session.sessionId))),
+          threadId: link.threadId,
+          agent: link.agent ?? link.session._agent,
+          activityStatus: link.status,
+          available: true,
+          reason: null,
+        };
+      });
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ ...mergeThreadSummary(match, thread), contents, supplement, subagents }));
       return;
     }
     if (url.pathname.startsWith("/api/")) { response.writeHead(404).end(); return; }

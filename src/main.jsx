@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createEmptySessionTabs, sessionTabsReducer } from "./lib/session-tabs.js";
 import { createRoot } from "react-dom/client";
 import { parseRolloutText } from "./lib/rollout.js";
-import { groupSessionsByProject } from "./lib/projects.js";
+import { groupSessionsByProject, normalizeSessionAgents } from "./lib/projects.js";
 import MarkdownContent from "./components/MarkdownContent.jsx";
 import "./style.css";
 
@@ -12,7 +12,11 @@ function formatDate(value) {
   return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
-function SessionTabContent({ sessionId, refreshVersion }) {
+function agentStatusLabel(status) {
+  return ({ started: "已启动", interacted: "执行中", interrupted: "已中断", completed: "已完成" })[status] ?? "状态未知";
+}
+
+function SessionTabContent({ sessionId, refreshVersion, onOpenSession }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -69,6 +73,19 @@ function SessionTabContent({ sessionId, refreshVersion }) {
   return <>
     {error && <div className="error-banner" role="alert">{error}</div>}
     <div className="session-header"><div><div className="eyebrow">{detail.archived ? "归档会话" : "活动会话"}<span>·</span>{detail.filename}</div><h1>{detail.title || detail.preview || "未命名会话"}</h1><p>{detail.cwd || "工作目录未知"}{detail.model ? ` · ${detail.model}` : ""}{detail.tokens_used != null ? ` · ${detail.tokens_used} tokens` : ""} <span>·</span> {formatDate(detail.updatedAt ?? detail.timestamp)}{detail.source ? ` · ${detail.source}` : ""}</p></div><div className="event-count"><strong>{timeline.length}</strong><small>条记录</small></div></div>
+    {detail.agent && <div className="agent-context"><span>子代理执行记录</span><strong>{detail.agent.agentPath || detail.agent.nickname || detail.sessionId}</strong>{detail.agent.nickname && detail.agent.agentPath && <small>{detail.agent.nickname}</small>}{detail.agent.role && <small>角色：{detail.agent.role}</small>}</div>}
+    {!!detail.subagents?.length && <section className="subagent-section" aria-label="子代理执行记录">
+      <div className="timeline-label"><h2>子代理执行记录</h2><span>{detail.subagents.length} 个关联子代理</span></div>
+      <div className="subagent-list">{detail.subagents.map((child) => {
+        const label = child.agent?.agentPath || child.agent?.nickname || child.title || child.preview || child.threadId;
+        return <article className={`subagent-card ${child.available ? "" : "unavailable"}`} key={child.threadId}>
+          <div className="subagent-copy"><strong>{label}</strong><small>{child.agent?.role ? `角色：${child.agent.role} · ` : ""}{agentStatusLabel(child.activityStatus)}{child.archived ? " · 已归档" : ""}</small>{child.reason && <p>{child.reason}</p>}</div>
+          {child.available && child.id
+            ? <button type="button" onClick={() => onOpenSession(child.id)} aria-label={`打开子代理轨迹：${label}`}>查看完整轨迹</button>
+            : <span className="subagent-unavailable">记录不可用</span>}
+        </article>;
+      })}</div>
+    </section>}
     <div className="timeline-label"><h2>运行记录</h2><span>按记录时间排列</span></div>
     <div className="timeline">{timeline.map((entry) => <article className={`event-card ${entry.kind}`} key={`${entry.lineNumber}-${entry.timestamp}`}>
       <div className="event-rail"><span className="event-marker" /></div><div className="event-body"><div className="event-meta"><span className="event-title">{entry.title}</span><time>{formatDate(entry.timestamp)}</time><span className="line-number">第 {entry.lineNumber} 行</span></div>
@@ -117,7 +134,7 @@ export function SessionViewer() {
     try {
       const response = await fetch("/api/sessions", { cache: "no-store" });
       if (!response.ok) throw new Error(`会话列表读取失败（${response.status}）`);
-      const items = await response.json();
+      const items = normalizeSessionAgents(await response.json());
       setSessions(items);
       setRefreshVersion((version) => version + 1);
       if (openFirst && items[0]) {
@@ -157,8 +174,8 @@ export function SessionViewer() {
       <div className="session-list">
         {projectGroups.map((group) => <section className="project-group" key={group.key}>
           <div className="project-heading" title={group.cwd || "项目未知"}><span className="project-heading-copy"><strong>{group.name}</strong><small>{group.cwd || "工作目录未知"}</small></span><span>{group.sessions.length}</span></div>
-          {group.sessions.map((session) => <button key={session.id} className={`session-item ${activeTab?.sessionId === session.id ? "active" : ""}`} onClick={() => openSession(session.id)} aria-label={`在新标签页打开：${session.title || session.preview}`}>
-            <span className={`session-icon ${session.archived ? "archived" : ""}`} aria-label={session.archived ? "已归档" : "活动会话"}>{session.archived ? "◷" : "◉"}</span><span className="session-copy"><strong>{session.title || session.preview}</strong><small>{session.model || "模型未知"}{session.tokens_used != null ? ` · ${session.tokens_used} tokens` : ""}</small><small>{formatDate(session.updatedAt ?? session.timestamp)} · {session.archived ? "已归档" : "活动"}{session.source ? ` · ${session.source}` : ""}</small></span>
+          {group.sessions.map((session) => <button key={session.id} className={`session-item ${activeTab?.sessionId === session.id ? "active" : ""}`} onClick={() => openSession(session.id)} aria-label={`在新标签页打开：${session.title || session.preview}${session.agent ? `，子代理会话，父会话：${session.agent.parentTitle || session.agent.parentThreadId || "未知"}` : ""}`}>
+            <span className={`session-icon ${session.archived ? "archived" : ""}`} aria-label={session.archived ? "已归档" : "活动会话"}>{session.archived ? "◷" : "◉"}</span><span className="session-copy"><strong>{session.title || session.preview}</strong>{session.agent && <span className={`session-agent-badge ${session.agent.conflict ? "conflict" : ""}`}>子代理会话</span>}<small>{session.agent?.conflict ? "父会话关联冲突" : session.agent ? `父会话：${session.agent.parentTitle || session.agent.parentThreadId || "未知"}` : "主会话"}</small><small>{session.agent?.agentPath || session.model || "模型未知"}{session.agent?.role ? ` · ${session.agent.role}` : ""}{session.tokens_used != null ? ` · ${session.tokens_used} tokens` : ""}</small><small>{formatDate(session.updatedAt ?? session.timestamp)} · {session.archived ? "已归档" : "活动"}{session.source ? ` · ${session.source}` : ""}</small></span>
           </button>)}
         </section>)}
         {!projectGroups.length && <p className="empty-list">{search ? "没有匹配的项目或会话" : "未发现会话记录"}</p>}
@@ -181,7 +198,7 @@ export function SessionViewer() {
       </div>
       <div className="session-tab-panels">
         {tabState.tabs.map((tab) => <section className="session-tab-panel" id={`session-panel-${tab.id}`} role="tabpanel" aria-labelledby={`session-tab-${tab.id}`} hidden={tab.id !== tabState.activeTabId} key={tab.id}>
-          <SessionTabContent sessionId={tab.sessionId} refreshVersion={refreshVersion} />
+          <SessionTabContent sessionId={tab.sessionId} refreshVersion={refreshVersion} onOpenSession={openSession} />
         </section>)}
         {!tabState.tabs.length && <div className="welcome"><div className="welcome-symbol">⌘</div><h1>{sessions.length ? "选择一个会话" : "还没有发现会话"}</h1><p>{sessions.length ? "从左侧列表打开一段本地 Codex 运行轨迹。" : "确认 CODEX_HOME 指向包含 sessions 或 archived_sessions 的目录，然后刷新。"}</p></div>}
       </div>

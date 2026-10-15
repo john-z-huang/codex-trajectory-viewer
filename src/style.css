@@ -29,6 +29,19 @@ body{height:100dvh;min-height:0;overflow:hidden}
 .tab-state{display:grid;height:100%;min-height:220px;place-content:center;text-align:center;color:#777}
 .session-tab-panel .session-header{max-width:100%}
 .session-tab-panel .timeline,.session-tab-panel .sqlite-sources{max-width:960px}
+.agent-context{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:14px;padding:10px 13px;border:1px solid #dfe5f2;border-radius:7px;background:#f8faff;color:#68718a;font-size:10px}
+.agent-context strong{color:#3f4d71;font-size:11px}
+.agent-context small{color:#8b91a0}
+.subagent-section{max-width:960px;margin-top:8px}
+.subagent-list{display:grid;gap:8px}
+.subagent-card{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 13px;border:1px solid #e3e6ed;border-radius:7px;background:#fff}
+.subagent-copy{display:grid;gap:4px;min-width:0}
+.subagent-copy strong{font-size:11px;overflow-wrap:anywhere}
+.subagent-copy small,.subagent-copy p,.subagent-unavailable{font-size:10px;color:#8d9099}
+.subagent-copy p{margin:2px 0 0;color:#9b5a4d}
+.subagent-card button{flex:none;border:1px solid #dfe2e8;border-radius:5px;background:#fff;padding:6px 9px;color:#505c77;font:inherit;font-size:10px;cursor:pointer}
+.subagent-card button:hover{background:#f5f7fb}
+.subagent-card.unavailable{background:#fafafa}
 .session-tab-panels>.welcome{height:100%;min-height:220px}
 @media(max-width:950px){
   .content{padding:0 26px}
@@ -36,3 +49,5 @@ body{height:100dvh;min-height:0;overflow:hidden}
   .session-tabs{margin:0 -26px;padding:5px 26px 0}
   .session-tab-panel{padding-bottom:48px}
 }
+.session-agent-badge{width:max-content;padding:2px 5px;border-radius:4px;background:#eef2ff;color:#505f97;font-size:9px;font-weight:650}
+.session-agent-badge.conflict{background:#fff0e8;color:#a55c34}

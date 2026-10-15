@@ -141,3 +141,83 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
     }
   }
 });
+
+test("父会话中的子代理入口打开独立标签并呈现子代理身份和完整时间线", async () => {
+  const window = new Window({ url: "http://localhost/" });
+  const original = new Map();
+  const globals = {
+    window,
+    document: window.document,
+    navigator: window.navigator,
+    HTMLElement: window.HTMLElement,
+    Node: window.Node,
+    MouseEvent: window.MouseEvent,
+    requestAnimationFrame: window.requestAnimationFrame.bind(window),
+    cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
+    IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    original.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  original.set("fetch", Object.getOwnPropertyDescriptor(globalThis, "fetch"));
+  const sessions = [
+    { id: "parent-file", sessionId: "parent-id", title: "Parent session", preview: "Parent", cwd: "/project", timestamp: "2026-10-15T00:00:00Z" },
+    { id: "child-file", sessionId: "child-id", title: "Research child", preview: "Child", cwd: "/project", timestamp: "2026-10-15T00:01:00Z", source: JSON.stringify({ subagent: { thread_spawn: { parent_thread_id: "parent-id", agent_path: "research/worker", agent_role: "explorer" } } }) },
+  ];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), "http://localhost/");
+    if (url.pathname === "/api/sessions") return jsonResponse(sessions);
+    const id = decodeURIComponent(url.pathname.split("/").at(-1));
+    if (id === "parent-file") return jsonResponse({
+      ...sessions[0], filename: "parent.jsonl", contents: "", supplement: [],
+      subagents: [{ ...sessions[1], agent: { parentThreadId: "parent-id", parentSessionId: "parent-file", parentTitle: "Parent session", agentPath: "research/worker", role: "explorer" }, threadId: "child-id", activityStatus: "completed", available: true, reason: null }],
+    });
+    if (id === "child-file") return jsonResponse({
+      ...sessions[1], agent: { parentThreadId: "parent-id", parentSessionId: "parent-file", parentTitle: "Parent session", agentPath: "research/worker", role: "explorer" }, filename: "child.jsonl", contents: JSON.stringify({ timestamp: "2026-10-15T00:01:00Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "input_text", text: "child only record" }] } }),
+      supplement: [], subagents: [],
+    });
+    return { ok: false, status: 404 };
+  };
+
+  let vite;
+  let root;
+  try {
+    vite = await createServer({
+      configFile: new URL("../vite.config.js", import.meta.url).pathname,
+      server: { middlewareMode: true },
+      appType: "custom",
+      logLevel: "error",
+    });
+    const { SessionViewer } = await vite.ssrLoadModule("/src/main.jsx");
+    const rootElement = window.document.createElement("div");
+    window.document.body.append(rootElement);
+    root = createRoot(rootElement);
+
+    await act(async () => {
+      root.render(React.createElement(SessionViewer));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const childSessionRow = [...rootElement.querySelectorAll(".session-item")].find((item) => item.textContent.includes("Research child"));
+    assert.match(childSessionRow.textContent, /子代理会话/);
+    assert.match(childSessionRow.textContent, /父会话：Parent session/);
+    assert.match(rootElement.querySelector(".subagent-section").textContent, /research\/worker/);
+    const openChild = rootElement.querySelector('[aria-label="打开子代理轨迹：research/worker"]');
+    assert.ok(openChild);
+    await act(async () => {
+      openChild.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(rootElement.querySelectorAll('[role="tab"]').length, 2);
+    assert.match(rootElement.querySelector('[role="tabpanel"]:not([hidden])').textContent, /child only record/);
+    assert.match(rootElement.querySelector('[role="tabpanel"]:not([hidden]) .agent-context').textContent, /research\/worker/);
+  } finally {
+    if (root) await act(async () => root.unmount());
+    if (vite) await vite.close();
+    window.happyDOM.abort();
+    for (const [key, descriptor] of original) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  }
+});

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { groupSessionsByProject } from "../src/lib/projects.js";
+import { groupSessionsByProject, normalizeSessionAgents } from "../src/lib/projects.js";
 
 const sessions = [
   { id: "active-new", cwd: "/work/alpha", title: "最近活动", timestamp: "2026-04-03T10:00:00Z", archived: false },
@@ -30,4 +30,46 @@ test("项目路径搜索与会话字段搜索均可用，未知项目可搜索",
   assert.deepEqual(groupSessionsByProject(sessions, "/archive").map(({ cwd }) => cwd), ["/archive/alpha"]);
   assert.deepEqual(groupSessionsByProject(sessions, "旧会话").flatMap(({ sessions: items }) => items.map(({ id }) => id)), ["archived-old"]);
   assert.deepEqual(groupSessionsByProject(sessions, "项目未知").flatMap(({ sessions: items }) => items.map(({ id }) => id)), ["unknown"]);
+});
+
+test("子代理会话继承父项目分组并可按子代理标记和父会话搜索", () => {
+  const parent = { id: "parent-file", sessionId: "parent-thread", cwd: "/work/alpha", title: "Deploy service", timestamp: "2026-04-03T10:00:00Z" };
+  const child = {
+    id: "child-file", sessionId: "child-thread", cwd: "", projectCwd: "/work/alpha", title: "Inspect logs",
+    timestamp: "2026-04-03T10:01:00Z",
+    agent: { agentPath: "research/worker", role: "explorer", parentThreadId: "parent-thread", parentTitle: "Deploy service", parentSessionId: "parent-file" },
+  };
+  const grouped = groupSessionsByProject([parent, child]);
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].cwd, "/work/alpha");
+  assert.deepEqual(grouped[0].sessions.map(({ id }) => id), ["child-file", "parent-file"]);
+  assert.deepEqual(groupSessionsByProject([parent, child], "子代理").flatMap((group) => group.sessions.map(({ id }) => id)), ["child-file"]);
+  assert.deepEqual(groupSessionsByProject([parent, child], "Deploy service").flatMap((group) => group.sessions.map(({ id }) => id)), ["child-file", "parent-file"]);
+  assert.deepEqual(groupSessionsByProject([parent, child], "research/worker").flatMap((group) => group.sessions.map(({ id }) => id)), ["child-file"]);
+});
+
+test("从 SQLite 序列化 source 识别子代理并显示父会话身份", () => {
+  const parent = { id: "parent-file", sessionId: "parent-thread", cwd: "/work/alpha", title: "Deploy service" };
+  const child = {
+    id: "child-file",
+    sessionId: "child-thread",
+    cwd: "/work/alpha",
+    source: JSON.stringify({ subagent: { thread_spawn: { parent_thread_id: "parent-thread", agent_path: "/root/primary_output", agent_nickname: "Lorentz" } } }),
+  };
+  const [normalizedParent, normalizedChild] = normalizeSessionAgents([parent, child]);
+  assert.equal(normalizedParent.agent, undefined);
+  assert.deepEqual(normalizedChild.agent, {
+    threadId: "child-thread",
+    parentThreadId: "parent-thread",
+    sourceParentThreadId: "parent-thread",
+    conflict: false,
+    agentPath: "/root/primary_output",
+    nickname: "Lorentz",
+    role: null,
+    depth: null,
+    parentSessionId: "parent-file",
+    parentTitle: "Deploy service",
+  });
+  assert.equal(groupSessionsByProject([normalizedParent, normalizedChild])[0].sessions.find((session) => session.id === "child-file").agent.agentPath, "/root/primary_output");
+  assert.deepEqual(groupSessionsByProject([normalizedParent, normalizedChild], "子代理").flatMap((group) => group.sessions.map((session) => session.id)), ["child-file"]);
 });

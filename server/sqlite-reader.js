@@ -95,7 +95,7 @@ export async function readThreadSummaries(sqliteHome, sessions) {
     const columns = database.prepare(`PRAGMA table_info(${quoteIdentifier("threads")})`).all().map((row) => row.name);
     const keyColumn = columns.find((column) => THREAD_KEYS.includes(column)) ?? columns.find((column) => column === "id");
     if (!keyColumn) return result;
-    const accepted = ["title", "cwd", "model", "tokens_used", "source", "archived", "updated_at", "updated_at_ms"];
+    const accepted = ["name", "title", "preview", "first_user_message", "cwd", "model", "tokens_used", "source", "archived", "updated_at", "updated_at_ms"];
     const selected = [...new Set([keyColumn, ...accepted.filter((column) => columns.includes(column))])];
     const ids = [...new Set(sessions.map((session) => session.sessionId).filter((id) => typeof id === "string" && id))];
     for (let offset = 0; offset < ids.length; offset += 400) {
