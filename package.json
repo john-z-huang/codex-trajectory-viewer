@@ -21,5 +21,8 @@
     "react-dom": "latest",
     "react-markdown": "^10.1.0",
     "vite": "latest"
+  },
+  "devDependencies": {
+    "happy-dom": "^21.0.1"
   }
 }

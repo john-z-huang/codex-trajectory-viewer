@@ -6,3 +6,33 @@
 .project-group{margin:0 0 14px}.project-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;color:#696c75;font-size:10px;letter-spacing:.02em}.project-heading-copy{display:grid;gap:3px;min-width:0}.project-heading strong,.project-heading small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-heading strong{font-weight:700}.project-heading small{font-size:9px;color:#a0a2a9;letter-spacing:0}.project-heading>span:last-child{flex:none;color:#a0a2a9;font-size:9px}.project-group .session-item{padding:9px 10px}.session-icon.archived{color:#9a8a72}
 
 .markdown-body{font:12px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#33353b;overflow-wrap:anywhere}.markdown-body>:first-child{margin-top:0}.markdown-body>:last-child{margin-bottom:0}.markdown-body p,.markdown-body ul,.markdown-body ol,.markdown-body blockquote,.markdown-body pre{margin:8px 0}.markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4{line-height:1.35;margin:12px 0 7px;color:#25262b}.markdown-body h1{font-size:18px}.markdown-body h2{font-size:16px}.markdown-body h3{font-size:14px}.markdown-body h4{font-size:12px}.markdown-body ul,.markdown-body ol{padding-left:22px}.markdown-body blockquote{border-left:3px solid #d9dbe1;padding-left:11px;color:#71747d}.markdown-body pre{background:#f7f7f8;border-radius:5px;padding:10px;overflow:auto;white-space:pre}.markdown-body :not(pre)>code{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;background:#f0f1f3;border-radius:3px;padding:1px 4px}.markdown-body a{color:#4d69a4;text-decoration:underline;text-underline-offset:2px}.markdown-body hr{border:0;border-top:1px solid #e7e8eb}.tool-output-plain{background:#f7f7f8;border-radius:5px;padding:10px;max-height:360px;overflow:auto}
+
+/* Keep the project/session navigator and each open conversation in separate scroll containers. */
+body{height:100dvh;min-height:0;overflow:hidden}
+.app-shell{height:100dvh;min-height:0;overflow:hidden}
+.sidebar{height:100dvh;min-height:0;overflow:hidden}
+.session-list{min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain}
+.content{height:100dvh;min-height:0;overflow:hidden;display:flex;flex-direction:column;padding:0 48px}
+.topbar{flex:0 0 66px;margin:0 -48px;padding:0 48px}
+.content>.error-banner{flex:none}
+.session-tabs{flex:0 0 auto;display:flex;align-items:stretch;gap:5px;min-height:42px;margin:0 -48px;padding:5px 48px 0;overflow-x:auto;overflow-y:hidden;border-bottom:1px solid #e6e7eb;background:#f5f6f8}
+.session-tab{display:flex;align-items:center;flex:0 0 auto;max-width:280px;min-width:120px;margin-bottom:-1px;border:1px solid transparent;border-bottom:0;border-radius:7px 7px 0 0}
+.session-tab.active{background:#fff;border-color:#e6e7eb}
+.session-tab-select{flex:1;min-width:0;overflow:hidden;padding:8px 5px 8px 11px;border:0;background:transparent;color:#656872;text-align:left;text-overflow:ellipsis;white-space:nowrap;font-size:11px;cursor:pointer}
+.session-tab.active .session-tab-select{color:#292a30;font-weight:600}
+.session-tab-close{flex:0 0 28px;width:28px;height:28px;margin-right:4px;border:0;border-radius:5px;background:transparent;color:#92949b;font-size:17px;line-height:1;cursor:pointer}
+.session-tab-close:hover{background:#eceef2;color:#333}
+.session-tab-panels{position:relative;flex:1;min-height:0;overflow:hidden}
+.session-tab-panel{height:100%;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:0 0 60px}
+.session-tab-panel[hidden]{display:none}
+.session-tab-panel>.error-banner{margin-top:12px}
+.tab-state{display:grid;height:100%;min-height:220px;place-content:center;text-align:center;color:#777}
+.session-tab-panel .session-header{max-width:100%}
+.session-tab-panel .timeline,.session-tab-panel .sqlite-sources{max-width:960px}
+.session-tab-panels>.welcome{height:100%;min-height:220px}
+@media(max-width:950px){
+  .content{padding:0 26px}
+  .topbar{margin:0 -26px;padding:0 26px}
+  .session-tabs{margin:0 -26px;padding:5px 26px 0}
+  .session-tab-panel{padding-bottom:48px}
+}
