@@ -21,7 +21,8 @@ function matchesSession(session, query) {
     session.sessionId,
     session.filename,
     session.archived ? "已归档" : "活动",
-    agent ? "子代理 子代理会话" : "主会话",
+    sessionKindLabel(session),
+    agent ? "子代理 子代理会话" : "",
     agent?.agentPath,
     agent?.nickname,
     agent?.role,
@@ -50,16 +51,41 @@ function agentPathText(value) {
 
 export function normalizeSessionAgents(sessions) {
   const withAgent = sessions.map((session) => {
-    if (session.agent) return session;
     const source = serializedSource(session);
     const spawn = source?.sub_agent?.thread_spawn ?? source?.subagent?.thread_spawn;
+    const hasTypedSubagentSource = source
+      && (Object.hasOwn(source, "sub_agent") || Object.hasOwn(source, "subagent"));
+    const isGuardian = Boolean(session.guardian)
+      || session.thread_source === "guardian_review"
+      || source?.subagent?.other === "guardian"
+      || source?.sub_agent?.other === "guardian";
+    if (isGuardian || (hasTypedSubagentSource && !spawn)) {
+      return {
+        ...session,
+        agent: undefined,
+        guardian: isGuardian || session.guardian,
+        projectCwd: session.cwd || "",
+      };
+    }
+    if (session.agent) return session;
+
     const sourceParentThreadId = typeof spawn?.parent_thread_id === "string" && spawn.parent_thread_id
       ? spawn.parent_thread_id
       : null;
     const directParentThreadId = typeof session.parent_thread_id === "string" && session.parent_thread_id
       ? session.parent_thread_id
       : null;
-    if (!sourceParentThreadId && !directParentThreadId) return session;
+    const hasLegacyAgentIdentity = Boolean(
+      agentPathText(session.agent_path)
+      || (typeof session.agent_nickname === "string" && session.agent_nickname)
+      || (typeof session.agent_role === "string" && session.agent_role),
+    );
+    const isLegacyAgent = typeof session.source === "string"
+      && session.source.trim().length > 0
+      && directParentThreadId
+      && hasLegacyAgentIdentity;
+    if (!sourceParentThreadId && !isLegacyAgent) return session;
+
     return {
       ...session,
       agent: {
@@ -89,6 +115,11 @@ export function normalizeSessionAgents(sessions) {
       },
     };
   });
+}
+
+export function sessionKindLabel(session) {
+  if (session.guardian) return "Guardian会话";
+  return session.agent ? "子代理会话" : "主会话";
 }
 
 export function groupSessionsByProject(sessions, search = "") {

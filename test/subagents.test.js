@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { normalizeSessionAgents } from "../src/lib/projects.js";
 import { linkSubagents, subagentActivityFromRollout, subagentMetadataFromSession } from "../server/subagents.js";
 
 test("子代理元数据支持 thread_spawn 与顶层 parent_thread_id 两种 Codex 记录", () => {
@@ -35,6 +36,18 @@ test("子代理元数据支持 thread_spawn 与顶层 parent_thread_id 两种 Co
     role: null,
     depth: null,
   });
+  assert.equal(subagentMetadataFromSession({
+    id: "guardian",
+    parent_thread_id: "parent-1",
+    source: { subagent: { other: "guardian" } },
+    thread_source: "guardian_review",
+  }), null);
+  assert.equal(subagentMetadataFromSession({
+    id: "review",
+    parent_thread_id: "parent-1",
+    source: { subagent: { review: {} } },
+    agent_path: ["reviewer"],
+  }), null);
   assert.equal(subagentMetadataFromSession({ id: "unrelated", source: { sub_agent: "review" } }), null);
 });
 
@@ -47,6 +60,88 @@ test("冲突的顶层与 source 父 ID 被标记而不自动确认", () => {
   assert.ok(metadata);
   assert.equal(metadata.parentThreadId, "parent-b");
   assert.equal(metadata.conflict, true);
+});
+
+test("Guardian review 保持普通会话且不继承父项目路径", () => {
+  const guardian = {
+    id: "guardian-session",
+    sessionId: "guardian-thread",
+    thread_source: "guardian_review",
+    parent_thread_id: "parent-thread",
+    source: { subagent: { other: "guardian" } },
+  };
+  const parent = {
+    id: "parent-session",
+    sessionId: "parent-thread",
+    cwd: "/work/project",
+  };
+
+  const [normalizedGuardian] = normalizeSessionAgents([guardian, parent]);
+
+  assert.equal(normalizedGuardian.agent, undefined);
+  assert.equal(normalizedGuardian.projectCwd, "");
+});
+
+test("非 spawn 的 typed subagent 变体不因顶层父 ID 或 agent_path 被标记", () => {
+  const typedReview = {
+    id: "review-session",
+    sessionId: "review-thread",
+    parent_thread_id: "parent-thread",
+    source: { subagent: { review: {} } },
+    agent_path: ["reviewer"],
+  };
+  const parent = {
+    id: "parent-session",
+    sessionId: "parent-thread",
+    cwd: "/work/project",
+  };
+
+  const [normalizedReview] = normalizeSessionAgents([typedReview, parent]);
+
+  assert.equal(normalizedReview.agent, undefined);
+  assert.equal(normalizedReview.projectCwd, "");
+});
+
+test("thread_spawn 与父 ID 冲突仍识别代理并阻止自动关联", () => {
+  const spawnChild = {
+    id: "spawn-child",
+    sessionId: "spawn-child-thread",
+    parent_thread_id: "different-parent",
+    source: { subagent: { thread_spawn: { parent_thread_id: "parent-thread", agent_path: ["worker"] } } },
+  };
+  const parent = {
+    id: "parent-session",
+    sessionId: "parent-thread",
+    cwd: "/work/project",
+  };
+
+  const [normalizedChild] = normalizeSessionAgents([spawnChild, parent]);
+
+  assert.equal(normalizedChild.agent.parentThreadId, "parent-thread");
+  assert.equal(normalizedChild.agent.conflict, true);
+  assert.equal(normalizedChild.agent.parentSessionId, null);
+  assert.equal(normalizedChild.projectCwd, "");
+});
+
+test("旧格式子代理保留普通字符串 source、顶层父 ID 与 agent_path", () => {
+  const legacyChild = {
+    id: "legacy-child",
+    sessionId: "legacy-child-thread",
+    source: "vscode",
+    parent_thread_id: "parent-thread",
+    agent_path: ["writer"],
+  };
+  const parent = {
+    id: "parent-session",
+    sessionId: "parent-thread",
+    cwd: "/work/project",
+  };
+
+  const [normalizedChild] = normalizeSessionAgents([legacyChild, parent]);
+
+  assert.equal(normalizedChild.agent.parentThreadId, "parent-thread");
+  assert.equal(normalizedChild.agent.agentPath, "writer");
+  assert.equal(normalizedChild.projectCwd, "/work/project");
 });
 
 test("从 Codex sub_agent_activity 事件读取 thread id、路径与最新状态", () => {

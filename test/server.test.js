@@ -12,6 +12,34 @@ function createDatabase(file, sql) {
   try { db.exec(sql); } finally { db.close(); }
 }
 
+test("会话列表 API 将 Guardian 标记为独立类型且不关联父会话目录", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "codex-viewer-guardian-"));
+  const sessionRoot = path.join(home, "sessions", "2026", "10", "15");
+  await mkdir(sessionRoot, { recursive: true });
+  const parentPath = path.join(sessionRoot, "parent.jsonl");
+  const guardianPath = path.join(sessionRoot, "guardian.jsonl");
+  await writeFile(parentPath, JSON.stringify({ type: "session_meta", payload: { id: "parent-thread", cwd: "/work/parent" } }) + "\n");
+  await writeFile(guardianPath, JSON.stringify({ type: "session_meta", payload: {
+    id: "guardian-thread",
+    parent_thread_id: "parent-thread",
+    thread_source: "guardian_review",
+    source: { subagent: { other: "guardian" } },
+  } }) + "\n");
+  const app = createAppServer({ home });
+  await new Promise((resolve) => app.listen(0, "127.0.0.1", resolve));
+  t.after(async () => { await new Promise((resolve) => app.close(resolve)); await rm(home, { recursive: true, force: true }); });
+
+  const base = "http://127.0.0.1:" + app.address().port;
+  const sessions = await (await fetch(base + "/api/sessions")).json();
+  const guardian = sessions.find((session) => session.sessionId === "guardian-thread");
+
+  assert.equal(guardian.guardian, true);
+  assert.equal(guardian.agent, null);
+  assert.equal(guardian.cwd, "");
+  assert.equal(Object.hasOwn(guardian, "projectCwd"), false);
+  assert.equal(Object.hasOwn(guardian, "isSubagent"), false);
+});
+
 test("仅发现 sessions / archived_sessions 下的 JSONL，并拒绝任意路径", async (t) => {
   const home = await mkdtemp(path.join(os.tmpdir(), "codex-viewer-"));
   const app = createAppServer({ home });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { groupSessionsByProject, normalizeSessionAgents } from "../src/lib/projects.js";
+import { groupSessionsByProject, normalizeSessionAgents, sessionKindLabel } from "../src/lib/projects.js";
 
 const sessions = [
   { id: "active-new", cwd: "/work/alpha", title: "最近活动", timestamp: "2026-04-03T10:00:00Z", archived: false },
@@ -72,4 +72,32 @@ test("从 SQLite 序列化 source 识别子代理并显示父会话身份", () =
   });
   assert.equal(groupSessionsByProject([normalizedParent, normalizedChild])[0].sessions.find((session) => session.id === "child-file").agent.agentPath, "/root/primary_output");
   assert.deepEqual(groupSessionsByProject([normalizedParent, normalizedChild], "子代理").flatMap((group) => group.sessions.map((session) => session.id)), ["child-file"]);
+});
+
+test("Guardian JSON source 标记为 Guardian会话且不继承父项目目录", () => {
+  const parent = { id: "parent-file", sessionId: "parent-thread", cwd: "/work/parent" };
+  const guardian = {
+    id: "guardian-file",
+    sessionId: "guardian-thread",
+    cwd: "",
+    projectCwd: "/work/parent",
+    parent_thread_id: "parent-thread",
+    thread_source: "guardian_review",
+    source: JSON.stringify({ subagent: { other: "guardian" } }),
+    agent: { parentThreadId: "parent-thread", parentSessionId: "parent-file" },
+  };
+  const [normalizedParent, normalizedGuardian] = normalizeSessionAgents([parent, guardian]);
+
+  assert.equal(normalizedGuardian.guardian, true);
+  assert.equal(normalizedGuardian.agent, undefined);
+  assert.equal(normalizedGuardian.projectCwd, "");
+  assert.equal(sessionKindLabel(normalizedGuardian), "Guardian会话");
+  assert.deepEqual(
+    groupSessionsByProject([normalizedParent, normalizedGuardian], "Guardian会话").flatMap((group) => group.sessions.map(({ id }) => id)),
+    ["guardian-file"],
+  );
+  assert.deepEqual(
+    groupSessionsByProject([normalizedParent, normalizedGuardian]).map(({ cwd }) => cwd),
+    ["", "/work/parent"],
+  );
 });
