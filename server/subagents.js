@@ -4,13 +4,32 @@ function asText(value) {
   return null;
 }
 
+export function isGuardianSession(metadata) {
+  const source = metadata?.source;
+  return metadata?.thread_source === "guardian_review"
+    || source?.subagent?.other === "guardian"
+    || source?.sub_agent?.other === "guardian";
+}
+
 export function subagentMetadataFromSession(metadata) {
-  const spawn = metadata?.source?.sub_agent?.thread_spawn;
+  const source = metadata?.source;
+  const spawn = source?.sub_agent?.thread_spawn ?? source?.subagent?.thread_spawn;
   const hasSpawn = Boolean(spawn && typeof spawn === "object");
+  const hasTypedSubagentSource = source && typeof source === "object"
+    && (Object.hasOwn(source, "sub_agent") || Object.hasOwn(source, "subagent"));
+  if (isGuardianSession(metadata) || (hasTypedSubagentSource && !hasSpawn)) return null;
+
   const directParentThreadId = typeof metadata?.parent_thread_id === "string" && metadata.parent_thread_id
     ? metadata.parent_thread_id
     : null;
-  if (!hasSpawn && !directParentThreadId) return null;
+  const hasLegacyIdentity = Boolean(
+    asText(metadata?.agent_path)
+    || asText(metadata?.agent_nickname)
+    || asText(metadata?.agent_role),
+  );
+  const isLegacyAgent = typeof source === "string" && source.trim().length > 0
+    && directParentThreadId && hasLegacyIdentity;
+  if (!hasSpawn && !isLegacyAgent) return null;
 
   const sourceParentThreadId = hasSpawn && typeof spawn.parent_thread_id === "string" && spawn.parent_thread_id
     ? spawn.parent_thread_id

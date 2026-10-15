@@ -26,6 +26,77 @@ function jsonResponse(value) {
   return { ok: true, json: async () => value };
 }
 
+test("Guardian 会话在侧栏显示 Guardian会话而不显示子代理标签", async () => {
+  const window = new Window({ url: "http://localhost/" });
+  const original = new Map();
+  const globals = {
+    window,
+    document: window.document,
+    navigator: window.navigator,
+    HTMLElement: window.HTMLElement,
+    Node: window.Node,
+    MouseEvent: window.MouseEvent,
+    requestAnimationFrame: window.requestAnimationFrame.bind(window),
+    cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
+    IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    original.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  original.set("fetch", Object.getOwnPropertyDescriptor(globalThis, "fetch"));
+  const guardianSession = {
+    id: "guardian-session",
+    sessionId: "guardian-thread",
+    title: "Guardian review",
+    preview: "Reviewing changes",
+    cwd: "",
+    guardian: true,
+    agent: null,
+    updatedAt: "2026-10-15T00:00:00Z",
+  };
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), "http://localhost/");
+    if (url.pathname === "/api/sessions") return jsonResponse([guardianSession]);
+    return jsonResponse({ ...guardianSession, filename: "guardian.jsonl", contents: "", supplement: [], subagents: [] });
+  };
+
+  let vite;
+  let root;
+  try {
+    vite = await createServer({
+      configFile: new URL("../vite.config.js", import.meta.url).pathname,
+      server: { middlewareMode: true },
+      appType: "custom",
+      logLevel: "error",
+    });
+    const { SessionViewer } = await vite.ssrLoadModule("/src/main.jsx");
+    const rootElement = window.document.createElement("div");
+    window.document.body.append(rootElement);
+    root = createRoot(rootElement);
+
+    await act(async () => {
+      root.render(React.createElement(SessionViewer));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const row = rootElement.querySelector(".session-list .session-item");
+    const badge = row?.querySelector(".session-agent-badge");
+    const supportingLabel = row?.querySelector(".session-copy small");
+    assert.equal(badge?.textContent, "Guardian会话");
+    assert.equal(supportingLabel?.textContent, "Guardian会话");
+    assert.doesNotMatch(row.textContent, /子代理会话/);
+  } finally {
+    if (root) await act(async () => root.unmount());
+    if (vite) await vite.close();
+    window.happyDOM.abort();
+    for (const [key, descriptor] of original) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  }
+});
+
 test("sidebar selection opens a new mounted tab and restores each tab's reading position", async () => {
   const window = new Window({ url: "http://localhost/" });
   const original = new Map();

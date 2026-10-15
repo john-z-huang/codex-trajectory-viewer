@@ -6,7 +6,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { previewFromRecord } from "../src/lib/rollout.js";
 import { readSessionSupplement, readThreadSummaries } from "./sqlite-reader.js";
-import { linkSubagents, subagentActivityFromRollout, subagentMetadataFromSession } from "./subagents.js";
+import { isGuardianSession, linkSubagents, subagentActivityFromRollout, subagentMetadataFromSession } from "./subagents.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const encodeId = (relativePath) => Buffer.from(relativePath).toString("base64url");
@@ -36,6 +36,7 @@ function mergeThreadSummary(session, row = {}) {
     tokens_used: row.tokens_used ?? null,
     source: row.source ?? null,
     agent: session._agent ?? null,
+    guardian: Boolean(session._guardian),
     archived,
     updatedAt,
   };
@@ -87,7 +88,7 @@ export async function discoverSessions(home) {
       const basename = path.basename(file.candidate);
       const match = basename.match(/^rollout-(?:\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-(.+)\.jsonl$/);
       const id = metadata?.id ?? metadata?.thread_id ?? match?.[1] ?? basename;
-      sessions.push({ id: encodeId(file.relativePath), sessionId: id, archived: file.archived, preview: preview || metadata?.initial_user_message || "无用户消息预览", cwd: metadata?.cwd ?? "", timestamp: firstTimestamp ?? info.mtime.toISOString(), filename: basename, _path: resolved, _relativePath: file.relativePath, _agent: subagentMetadataFromSession(metadata), _metadataName: metadata?.name, _metadataTitle: metadata?.title, _initialUserMessage: metadata?.initial_user_message });
+      sessions.push({ id: encodeId(file.relativePath), sessionId: id, archived: file.archived, preview: preview || metadata?.initial_user_message || "无用户消息预览", cwd: metadata?.cwd ?? "", timestamp: firstTimestamp ?? info.mtime.toISOString(), filename: basename, _path: resolved, _relativePath: file.relativePath, _agent: subagentMetadataFromSession(metadata), _guardian: isGuardianSession(metadata), _metadataName: metadata?.name, _metadataTitle: metadata?.title, _initialUserMessage: metadata?.initial_user_message });
     } catch { /* unreadable files are skipped; discovered files remain strictly allowlisted */ }
   }
   return sessions.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
