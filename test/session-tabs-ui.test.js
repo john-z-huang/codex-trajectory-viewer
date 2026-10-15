@@ -26,6 +26,84 @@ function jsonResponse(value) {
   return { ok: true, json: async () => value };
 }
 
+test("子代理侧栏、标签和详情标题统一显示规范化 agent_path", async () => {
+  const window = new Window({ url: "http://localhost/" });
+  const original = new Map();
+  const globals = {
+    window,
+    document: window.document,
+    navigator: window.navigator,
+    HTMLElement: window.HTMLElement,
+    Node: window.Node,
+    MouseEvent: window.MouseEvent,
+    requestAnimationFrame: window.requestAnimationFrame.bind(window),
+    cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
+    IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    original.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  original.set("fetch", Object.getOwnPropertyDescriptor(globalThis, "fetch"));
+  const instruction = "Please implement the delegated work and report back.";
+  const child = {
+    id: "child-file",
+    sessionId: "child-thread",
+    title: "",
+    preview: instruction,
+    cwd: "/project",
+    agent_path: "/root/subagent_classification",
+    agent: { parentThreadId: "parent-thread", agentPath: "/root/subagent_classification", nickname: "Franklin" },
+    source: JSON.stringify({ subagent: { thread_spawn: { agent_path: "/root/subagent_classification" } } }),
+    updatedAt: "2026-10-15T00:00:00Z",
+  };
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), "http://localhost/");
+    if (url.pathname === "/api/sessions") return jsonResponse([child]);
+    return jsonResponse({ ...child, filename: "child.jsonl", contents: "", supplement: [], subagents: [] });
+  };
+
+  let vite;
+  let root;
+  try {
+    vite = await createServer({
+      configFile: new URL("../vite.config.js", import.meta.url).pathname,
+      server: { middlewareMode: true },
+      appType: "custom",
+      logLevel: "error",
+    });
+    const { SessionViewer } = await vite.ssrLoadModule("/src/main.jsx");
+    const rootElement = window.document.createElement("div");
+    window.document.body.append(rootElement);
+    root = createRoot(rootElement);
+
+    await act(async () => {
+      root.render(React.createElement(SessionViewer));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const displayedTitles = [
+      rootElement.querySelector(".session-list .session-copy strong")?.textContent,
+      rootElement.querySelector(".session-tab-select")?.textContent,
+      rootElement.querySelector(".session-header h1")?.textContent,
+    ];
+    assert.deepEqual(displayedTitles, ["subagent_classification", "subagent_classification", "subagent_classification"]);
+    for (const title of displayedTitles) assert.doesNotMatch(title, /Please implement the delegated work/);
+    const sessionButton = rootElement.querySelector(".session-list .session-item");
+    const accessibleName = sessionButton?.getAttribute("aria-label") ?? "";
+    assert.match(accessibleName, /subagent_classification/);
+    assert.doesNotMatch(accessibleName, /Please implement the delegated work/);
+  } finally {
+    if (root) await act(async () => root.unmount());
+    if (vite) await vite.close();
+    window.happyDOM.abort();
+    for (const [key, descriptor] of original) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  }
+});
+
 test("Guardian 会话在侧栏显示 Guardian会话而不显示子代理标签", async () => {
   const window = new Window({ url: "http://localhost/" });
   const original = new Map();
@@ -234,7 +312,7 @@ test("父会话中的子代理入口打开独立标签并呈现子代理身份�
   original.set("fetch", Object.getOwnPropertyDescriptor(globalThis, "fetch"));
   const sessions = [
     { id: "parent-file", sessionId: "parent-id", title: "Parent session", preview: "Parent", cwd: "/project", timestamp: "2026-10-15T00:00:00Z" },
-    { id: "child-file", sessionId: "child-id", title: "Research child", preview: "Child", cwd: "/project", timestamp: "2026-10-15T00:01:00Z", source: JSON.stringify({ subagent: { thread_spawn: { parent_thread_id: "parent-id", agent_path: "research/worker", agent_role: "explorer" } } }) },
+    { id: "child-file", sessionId: "child-id", title: "Research child", preview: "Child", cwd: "/project", timestamp: "2026-10-15T00:01:00Z", source: JSON.stringify({ subagent: { thread_spawn: { parent_thread_id: "parent-id", agent_path: "/root/research/worker", agent_role: "explorer" } } }) },
   ];
   globalThis.fetch = async (input) => {
     const url = new URL(String(input), "http://localhost/");
@@ -242,10 +320,10 @@ test("父会话中的子代理入口打开独立标签并呈现子代理身份�
     const id = decodeURIComponent(url.pathname.split("/").at(-1));
     if (id === "parent-file") return jsonResponse({
       ...sessions[0], filename: "parent.jsonl", contents: "", supplement: [],
-      subagents: [{ ...sessions[1], agent: { parentThreadId: "parent-id", parentSessionId: "parent-file", parentTitle: "Parent session", agentPath: "research/worker", role: "explorer" }, threadId: "child-id", activityStatus: "completed", available: true, reason: null }],
+      subagents: [{ ...sessions[1], agent: { parentThreadId: "parent-id", parentSessionId: "parent-file", parentTitle: "Parent session", agentPath: "/root/research/worker", role: "explorer" }, threadId: "child-id", activityStatus: "completed", available: true, reason: null }],
     });
     if (id === "child-file") return jsonResponse({
-      ...sessions[1], agent: { parentThreadId: "parent-id", parentSessionId: "parent-file", parentTitle: "Parent session", agentPath: "research/worker", role: "explorer" }, filename: "child.jsonl", contents: JSON.stringify({ timestamp: "2026-10-15T00:01:00Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "input_text", text: "child only record" }] } }),
+      ...sessions[1], agent: { parentThreadId: "parent-id", parentSessionId: "parent-file", parentTitle: "Parent session", agentPath: "/root/research/worker", role: "explorer" }, filename: "child.jsonl", contents: JSON.stringify({ timestamp: "2026-10-15T00:01:00Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "input_text", text: "child only record" }] } }),
       supplement: [], subagents: [],
     });
     return { ok: false, status: 404 };
@@ -269,7 +347,7 @@ test("父会话中的子代理入口打开独立标签并呈现子代理身份�
       root.render(React.createElement(SessionViewer));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    const childSessionRow = [...rootElement.querySelectorAll(".session-item")].find((item) => item.textContent.includes("Research child"));
+    const childSessionRow = [...rootElement.querySelectorAll(".session-item")].find((item) => item.textContent.includes("research/worker"));
     assert.match(childSessionRow.textContent, /子代理会话/);
     assert.match(childSessionRow.textContent, /父会话：Parent session/);
     assert.match(rootElement.querySelector(".subagent-section").textContent, /research\/worker/);

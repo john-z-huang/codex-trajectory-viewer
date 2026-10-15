@@ -155,11 +155,11 @@ test("在父会话中关联并读取子代理 rollout，缺失与冲突记录显
   const root = path.join(home, "sessions", "2026", "10", "15");
   await mkdir(root, { recursive: true });
   const parentThreadId = "parent-1111";
-  const childThreadId = "child-2222";
+  const childThreadId = "22222222-2222-4222-8222-222222222222";
   const secondChildThreadId = "child-5555";
   const conflictedThreadId = "child-3333";
   const parentPath = path.join(root, "rollout-parent.jsonl");
-  const childPath = path.join(root, "rollout-child.jsonl");
+  const childPath = path.join(root, `rollout-2026-10-15T00-00-01-${childThreadId}.jsonl`);
   const secondChildPath = path.join(root, "rollout-second-child.jsonl");
   const conflictPath = path.join(root, "rollout-conflict.jsonl");
   const parentContents = [
@@ -174,6 +174,7 @@ test("在父会话中关联并读取子代理 rollout，缺失与冲突记录显
   ].map((record) => JSON.stringify(record)).join("\n") + "\n";
   const childContents = [
     { timestamp: "2026-10-15T00:00:01Z", type: "session_meta", payload: { id: childThreadId, parent_thread_id: parentThreadId, source: { sub_agent: { thread_spawn: { parent_thread_id: parentThreadId, depth: 1, agent_path: ["research"] } } }, agent_nickname: "Bluebird", agent_role: "explorer", cwd: "/synthetic/project" } },
+    { timestamp: "2026-10-15T00:00:01.500Z", type: "session_meta", payload: { id: parentThreadId, cwd: "/synthetic/parent", initial_user_message: "Later parent metadata must not replace child identity" } },
     { timestamp: "2026-10-15T00:00:02Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "input_text", text: "子代理合成执行内容" }] } },
   ].map((record) => JSON.stringify(record)).join("\n") + "\n损坏的合成子代理行\n";
   const conflictContents = [
@@ -194,9 +195,13 @@ test("在父会话中关联并读取子代理 rollout，缺失与冲突记录显
   const parent = sessions.find((session) => session.sessionId === parentThreadId);
   const child = sessions.find((session) => session.sessionId === childThreadId);
   assert.ok(parent);
+  assert.ok(child);
+  assert.equal(child.sessionId, childThreadId);
   assert.equal(child.agent.agentPath, "research");
+  assert.equal(child.agent.parentThreadId, parentThreadId);
   assert.equal(child.agent.parentSessionId, parent.id);
   assert.equal(child.agent.parentTitle, "Parent conversation title");
+  assert.equal(child.cwd, "/synthetic/project");
   const secondChild = sessions.find((session) => session.sessionId === secondChildThreadId);
   assert.equal(secondChild.cwd, "");
   assert.equal(secondChild.projectCwd, "/synthetic/project");

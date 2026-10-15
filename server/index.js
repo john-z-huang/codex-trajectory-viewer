@@ -74,20 +74,29 @@ export async function discoverSessions(home) {
       let content = "";
       for await (const chunk of stream) content += chunk;
       const records = content.split(/\r?\n/).slice(0, 8);
+      const basename = path.basename(file.candidate);
+      const filenameMatch = basename.match(/^rollout-(?:\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-(.+)\.jsonl$/);
+      const filenameSessionId = filenameMatch?.[1] ?? null;
       let metadata = null;
+      let matchingMetadata = null;
       let preview = "";
       let firstTimestamp = null;
       for (const line of records) {
         try {
           const record = JSON.parse(line);
           firstTimestamp ??= record.timestamp ?? null;
-          if (record.type === "session_meta" || record.type === "session_meta_entry") metadata = record.payload ?? {};
+          if (record.type === "session_meta" || record.type === "session_meta_entry") {
+            metadata = record.payload ?? {};
+            const metadataId = metadata.id ?? metadata.thread_id;
+            if (!matchingMetadata && filenameSessionId && metadataId === filenameSessionId) {
+              matchingMetadata = metadata;
+            }
+          }
           preview ||= previewFromRecord(record);
         } catch { /* malformed lines remain available in the detail view */ }
       }
-      const basename = path.basename(file.candidate);
-      const match = basename.match(/^rollout-(?:\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-(.+)\.jsonl$/);
-      const id = metadata?.id ?? metadata?.thread_id ?? match?.[1] ?? basename;
+      metadata = matchingMetadata ?? metadata;
+      const id = metadata?.id ?? metadata?.thread_id ?? filenameSessionId ?? basename;
       sessions.push({ id: encodeId(file.relativePath), sessionId: id, archived: file.archived, preview: preview || metadata?.initial_user_message || "无用户消息预览", cwd: metadata?.cwd ?? "", timestamp: firstTimestamp ?? info.mtime.toISOString(), filename: basename, _path: resolved, _relativePath: file.relativePath, _agent: subagentMetadataFromSession(metadata), _guardian: isGuardianSession(metadata), _metadataName: metadata?.name, _metadataTitle: metadata?.title, _initialUserMessage: metadata?.initial_user_message });
     } catch { /* unreadable files are skipped; discovered files remain strictly allowlisted */ }
   }

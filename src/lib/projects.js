@@ -117,6 +117,21 @@ export function normalizeSessionAgents(sessions) {
   });
 }
 
+export function normalizedAgentPath(session) {
+  const source = serializedSource(session);
+  const spawn = source?.sub_agent?.thread_spawn ?? source?.subagent?.thread_spawn;
+  const agentPath = agentPathText(session.agent?.agentPath)
+    ?? agentPathText(session.agent_path)
+    ?? agentPathText(spawn?.agent_path);
+  return agentPath?.replace(/^\/root\//, "") || null;
+}
+
+export function sessionDisplayTitle(session, fallback = session.title || session.preview) {
+  const agentPath = session.agent ? normalizedAgentPath(session) : null;
+  if (agentPath) return agentPath;
+  return session.title || session.preview || fallback || "未命名会话";
+}
+
 export function sessionKindLabel(session) {
   if (session.guardian) return "Guardian会话";
   return session.agent ? "子代理会话" : "主会话";
