@@ -1,0 +1,119 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { parseRolloutText } from "./lib/rollout.js";
+import { groupSessionsByProject } from "./lib/projects.js";
+import MarkdownContent from "./components/MarkdownContent.jsx";
+import "./style.css";
+
+function formatDate(value) {
+  if (!value) return "时间未知";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
+function SessionViewer() {
+  const [sessions, setSessions] = useState([]);
+  const [selected, setSelected] = useState("");
+  const [detail, setDetail] = useState(null);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  async function refresh(keepSelection = true) {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/sessions", { cache: "no-store" });
+      if (!response.ok) throw new Error(`会话列表读取失败（${response.status}）`);
+      const items = await response.json();
+      setSessions(items);
+      setRefreshVersion((version) => version + 1);
+      const stillExists = items.some((item) => item.id === selected);
+      if ((!keepSelection || !stillExists) && items[0]) setSelected(items[0].id);
+      if (!items.length) { setSelected(""); setDetail(null); }
+    } catch (reason) { setError(reason.message); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { refresh(false); }, []);
+  useEffect(() => {
+    if (!selected) return;
+    let ignore = false;
+    setDetail(null);
+    fetch(`/api/sessions/${encodeURIComponent(selected)}`, { cache: "no-store" })
+      .then((response) => { if (!response.ok) throw new Error(`会话读取失败（${response.status}）`); return response.json(); })
+      .then((value) => { if (!ignore) { setDetail(value); setError(""); } })
+      .catch((reason) => { if (!ignore) setError(reason.message); });
+    return () => { ignore = true; };
+  }, [selected, refreshVersion]);
+
+  async function loadHistoryPage(page) {
+    if (!detail || page < 1) return;
+    setHistoryLoading(true);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(selected)}?historyPage=${page}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`SQLite 历史读取失败（${response.status}）`);
+      const value = await response.json();
+      setDetail((current) => current ? { ...current, supplement: value.supplement } : current);
+      setError("");
+    } catch (reason) { setError(reason.message); }
+    finally { setHistoryLoading(false); }
+  }
+
+  const projectGroups = useMemo(() => groupSessionsByProject(sessions, search), [sessions, search]);
+  const timeline = useMemo(() => detail ? parseRolloutText(detail.contents) : [], [detail]);
+
+  return <main className="app-shell">
+    <aside className="sidebar">
+      <div className="brand"><span className="brand-mark">C</span><div><strong>Codex</strong><small>运行轨迹查看器</small></div></div>
+      <div className="side-heading"><span>会话</span><button className="icon-button" onClick={() => refresh()} aria-label="刷新会话" title="刷新会话">↻</button></div>
+      <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索项目或会话" /></label>
+      <div className="session-list">
+        {projectGroups.map((group) => <section className="project-group" key={group.key}>
+          <div className="project-heading" title={group.cwd || "项目未知"}><span className="project-heading-copy"><strong>{group.name}</strong><small>{group.cwd || "工作目录未知"}</small></span><span>{group.sessions.length}</span></div>
+          {group.sessions.map((session) => <button key={session.id} className={`session-item ${selected === session.id ? "active" : ""}`} onClick={() => setSelected(session.id)}>
+            <span className={`session-icon ${session.archived ? "archived" : ""}`} aria-label={session.archived ? "已归档" : "活动会话"}>{session.archived ? "◷" : "◉"}</span><span className="session-copy"><strong>{session.title || session.preview}</strong><small>{session.model || "模型未知"}{session.tokens_used != null ? ` · ${session.tokens_used} tokens` : ""}</small><small>{formatDate(session.updatedAt ?? session.timestamp)} · {session.archived ? "已归档" : "活动"}{session.source ? ` · ${session.source}` : ""}</small></span>
+          </button>)}
+        </section>)}
+        {!projectGroups.length && <p className="empty-list">{search ? "没有匹配的项目或会话" : "未发现会话记录"}</p>}
+      </div>
+      <div className="sidebar-footer"><span className="status-dot" />仅在本机读取</div>
+    </aside>
+    <section className="content">
+      <header className="topbar"><div className="breadcrumb">本地数据 <span>/</span> {detail?.archived ? "归档会话" : "会话详情"}</div><div className="top-actions"><span className="local-badge"><span className="status-dot" />本地</span><button className="refresh-button" onClick={() => refresh()} disabled={loading}>{loading ? "刷新中…" : "↻　刷新"}</button></div></header>
+      {error && <div className="error-banner" role="alert">{error}</div>}
+      {detail ? <>
+        <div className="session-header"><div><div className="eyebrow">{detail.archived ? "归档会话" : "活动会话"}<span>·</span>{detail.filename}</div><h1>{detail.title || detail.preview || "未命名会话"}</h1><p>{detail.cwd || "工作目录未知"}{detail.model ? ` · ${detail.model}` : ""}{detail.tokens_used != null ? ` · ${detail.tokens_used} tokens` : ""} <span>·</span> {formatDate(detail.updatedAt ?? detail.timestamp)}{detail.source ? ` · ${detail.source}` : ""}</p></div><div className="event-count"><strong>{timeline.length}</strong><small>条记录</small></div></div>
+        <div className="timeline-label"><h2>运行记录</h2><span>按记录时间排列</span></div>
+        <div className="timeline">{timeline.map((entry) => <article className={`event-card ${entry.kind}`} key={`${entry.lineNumber}-${entry.timestamp}`}>
+          <div className="event-rail"><span className="event-marker" /></div><div className="event-body"><div className="event-meta"><span className="event-title">{entry.title}</span><time>{formatDate(entry.timestamp)}</time><span className="line-number">第 {entry.lineNumber} 行</span></div>
+            {entry.markdown && entry.text && <MarkdownContent>{entry.text}</MarkdownContent>}
+            {entry.contentParts?.map((part, index) => part.kind === "markdown"
+              ? <MarkdownContent key={`${entry.lineNumber}-markdown-${index}`}>{part.text}</MarkdownContent>
+              : <pre className="event-text tool-output-plain" key={`${entry.lineNumber}-plain-${index}`}>{part.text}</pre>)}
+            {entry.text && !entry.markdown && !entry.contentParts && <pre className="event-text">{typeof entry.text === "string" ? entry.text : JSON.stringify(entry.text, null, 2)}</pre>}
+            {entry.kind === "invalid" && <p className="warning">该行不是有效 JSON，原文仍保留在下方。</p>}
+            <details><summary>原始 JSON</summary><pre>{entry.raw}</pre></details>
+          </div>
+        </article>)}</div>
+        <section className="sqlite-section">
+          <div className="timeline-label"><h2>SQLite 补充数据</h2><span>按会话 ID 关联 · 只读</span></div>
+          <div className="sqlite-sources">{(detail.supplement ?? []).map((source) => <article className="sqlite-source" key={source.database}>
+            <div className="sqlite-source-heading"><strong>{source.database}</strong><span className={source.available ? "source-ok" : "source-muted"}>{source.available ? "已读取" : "不可用"}</span></div>
+            {source.error && <p className="source-note">{source.error}</p>}
+            {source.tables?.map((table) => <details className="sqlite-table" key={table.table}>
+              <summary>{table.table}<span>{table.rows?.length ? `${table.rows.length} 条` : table.reason ?? "没有关联记录"}</span></summary>
+              {table.reason && <p className="source-note">{table.reason}</p>}
+              {table.rows?.slice(0, 50).map((row, index) => <pre className="sqlite-row" key={`${table.table}-${index}`}>{JSON.stringify(row, null, 2).slice(0, 12_000)}{JSON.stringify(row, null, 2).length > 12_000 ? "… [row truncated]" : ""}</pre>)}
+              {table.pagination && <div className="history-pager"><span>第 {table.pagination.page} 页，共 {table.pagination.totalRows} 条</span><button onClick={() => loadHistoryPage(table.pagination.page - 1)} disabled={historyLoading || table.pagination.page <= 1}>上一页</button><button onClick={() => loadHistoryPage(table.pagination.page + 1)} disabled={historyLoading || !table.pagination.hasMore}>下一页</button></div>}
+            </details>)}
+          </article>)}</div>
+        </section>
+      </> : <div className="welcome"><div className="welcome-symbol">⌘</div><h1>{sessions.length ? "选择一个会话" : "还没有发现会话"}</h1><p>{sessions.length ? "从左侧列表打开一段本地 Codex 运行轨迹。" : "确认 CODEX_HOME 指向包含 sessions 或 archived_sessions 的目录，然后刷新。"}</p></div>}
+    </section>
+  </main>;
+}
+
+createRoot(document.getElementById("root")).render(<React.StrictMode><SessionViewer /></React.StrictMode>);
