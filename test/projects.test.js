@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { groupSessionsByProject, normalizeSessionAgents, sessionKindLabel } from "../src/lib/projects.js";
+import { groupSessionsByProject, normalizeSessionAgents, sessionDisplayTitle, sessionKindLabel } from "../src/lib/projects.js";
 
 const sessions = [
   { id: "active-new", cwd: "/work/alpha", title: "最近活动", timestamp: "2026-04-03T10:00:00Z", archived: false },
@@ -100,4 +100,34 @@ test("Guardian JSON source 标记为 Guardian会话且不继承父项目目录",
     groupSessionsByProject([normalizedParent, normalizedGuardian]).map(({ cwd }) => cwd),
     ["", "/work/parent"],
   );
+});
+
+test("子代理标题优先使用去掉 /root/ 前缀的 agent_path，缺失时保留标题回退", () => {
+  const directive = "Please investigate the parent task and report findings.";
+  assert.equal(sessionDisplayTitle({
+    title: "",
+    preview: directive,
+    agent_path: "/root/subagent_classification",
+    agent: { agentPath: "/root/subagent_classification", nickname: "Franklin" },
+  }), "subagent_classification");
+  assert.equal(sessionDisplayTitle({
+    title: "",
+    preview: directive,
+    agent: { agentPath: ["/root", "workers", "research"], nickname: "Franklin" },
+  }), "workers/research");
+  assert.equal(sessionDisplayTitle({
+    title: "",
+    preview: directive,
+    agent: { agentPath: "/workspace/worker", nickname: "Franklin" },
+  }), "/workspace/worker");
+  assert.equal(sessionDisplayTitle({
+    title: "Existing child title",
+    preview: directive,
+    agent: { nickname: "Franklin" },
+  }), "Existing child title");
+  assert.equal(sessionDisplayTitle({
+    title: "",
+    preview: "",
+    agent: { nickname: "Franklin" },
+  }), "未命名会话");
 });
