@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeSessionAgents } from "../src/lib/projects.js";
+import { normalizeSessionAgents } from "../src/lib/session-identity.js";
 import { linkSubagents, subagentActivityFromRollout, subagentMetadataFromSession } from "../server/subagents.js";
 
 test("子代理元数据支持 thread_spawn 与顶层 parent_thread_id 两种 Codex 记录", () => {

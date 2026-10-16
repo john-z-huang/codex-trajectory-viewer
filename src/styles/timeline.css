@@ -1,0 +1,168 @@
+.event-count {
+  height: 50px;
+  min-width: 62px;
+  border: 1px solid #e5e6e9;
+  border-radius: 9px;
+  background: #fff;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+}
+
+.event-count strong {
+  font-size: 15px;
+}
+
+.event-count small {
+  font-size: 9px;
+  color: #898c94;
+}
+
+.timeline-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 22px 0 17px;
+}
+
+.timeline-label h2 {
+  font-size: 12px;
+  margin: 0;
+  font-weight: 700;
+}
+
+.timeline-label span {
+  font-size: 10px;
+  color: #989aa1;
+}
+
+.timeline {
+  max-width: 960px;
+}
+
+.event-card {
+  display: grid;
+  grid-template-columns: 23px minmax(0,1fr);
+  gap: 7px;
+}
+
+.event-rail {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+
+.event-rail:after {
+  content: "";
+  position: absolute;
+  top: 13px;
+  bottom: -2px;
+  width: 1px;
+  background: #e1e2e6;
+}
+
+.event-card:last-child .event-rail:after {
+  display: none;
+}
+
+.event-marker {
+  z-index: 1;
+  margin-top: 7px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid #a6a9b1;
+  background: #f5f6f8;
+  border-radius: 50%;
+}
+
+.event-card.user .event-marker {
+  border-color: #529c77;
+}
+
+.event-card.assistant .event-marker {
+  border-color: #6965b5;
+}
+
+.event-card.tool-call .event-marker {
+  border-color: #c18b3a;
+}
+
+.event-card.tool-result .event-marker {
+  border-color: #668d9e;
+}
+
+.event-body {
+  border: 1px solid #e6e7eb;
+  background: #fff;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 11px;
+  min-width: 0;
+}
+
+.event-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.event-title {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.event-meta time,.line-number {
+  font-size: 9px;
+  color: #9a9ca3;
+}
+
+.line-number {
+  margin-left: auto;
+}
+
+.event-text {
+  font: 12px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 11px 0 0;
+  color: #33353b;
+}
+
+.event-body details {
+  margin-top: 11px;
+  border-top: 1px solid #f0f0f2;
+  padding-top: 8px;
+}
+
+.event-body summary {
+  font-size: 10px;
+  color: #8c8e96;
+  cursor: pointer;
+}
+
+.event-body details pre {
+  font: 10px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color: #666a73;
+  background: #f7f7f8;
+  border-radius: 5px;
+  padding: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.warning {
+  font-size: 11px;
+  color: #a44936;
+  margin: 9px 0 0;
+}
+
+.tool-output-plain {
+  background: #f7f7f8;
+  border-radius: 5px;
+  padding: 10px;
+  max-height: 360px;
+  overflow: auto;
+}

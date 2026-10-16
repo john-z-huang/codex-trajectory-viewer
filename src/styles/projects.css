@@ -1,0 +1,50 @@
+.project-group {
+  margin: 0 0 14px;
+}
+
+.project-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  color: #696c75;
+  font-size: 10px;
+  letter-spacing: .02em;
+}
+
+.project-heading-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.project-heading strong,.project-heading small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-heading strong {
+  font-weight: 700;
+}
+
+.project-heading small {
+  font-size: 9px;
+  color: #a0a2a9;
+  letter-spacing: 0;
+}
+
+.project-heading>span:last-child {
+  flex: none;
+  color: #a0a2a9;
+  font-size: 9px;
+}
+
+.project-group .session-item {
+  padding: 9px 10px;
+}
+
+.session-icon.archived {
+  color: #9a8a72;
+}

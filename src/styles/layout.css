@@ -1,0 +1,41 @@
+/*Keep the project/session navigator and each open conversation in separate scroll containers.*/
+
+body {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-shell {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-list {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.content {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0 48px;
+}
+
+.topbar {
+  flex: 0 0 66px;
+  margin: 0 -48px;
+  padding: 0 48px;
+}

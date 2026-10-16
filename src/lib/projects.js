@@ -1,3 +1,5 @@
+import { sessionKindLabel } from "./session-identity.js";
+
 function timestampValue(session) {
   const value = new Date(session.updatedAt ?? session.timestamp ?? 0).valueOf();
   return Number.isFinite(value) ? value : 0;
@@ -30,111 +32,6 @@ function matchesSession(session, query) {
     agent?.parentThreadId,
   ].filter(Boolean).join(" ").toLocaleLowerCase();
   return searchable.includes(query);
-}
-
-function serializedSource(session) {
-  const source = session.source;
-  if (source && typeof source === "object") return source;
-  if (typeof source !== "string") return null;
-  try {
-    const parsed = JSON.parse(source);
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function agentPathText(value) {
-  if (Array.isArray(value)) return value.filter((part) => typeof part === "string").join("/") || null;
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-export function normalizeSessionAgents(sessions) {
-  const withAgent = sessions.map((session) => {
-    const source = serializedSource(session);
-    const spawn = source?.sub_agent?.thread_spawn ?? source?.subagent?.thread_spawn;
-    const hasTypedSubagentSource = source
-      && (Object.hasOwn(source, "sub_agent") || Object.hasOwn(source, "subagent"));
-    const isGuardian = Boolean(session.guardian)
-      || session.thread_source === "guardian_review"
-      || source?.subagent?.other === "guardian"
-      || source?.sub_agent?.other === "guardian";
-    if (isGuardian || (hasTypedSubagentSource && !spawn)) {
-      return {
-        ...session,
-        agent: undefined,
-        guardian: isGuardian || session.guardian,
-        projectCwd: session.cwd || "",
-      };
-    }
-    if (session.agent) return session;
-
-    const sourceParentThreadId = typeof spawn?.parent_thread_id === "string" && spawn.parent_thread_id
-      ? spawn.parent_thread_id
-      : null;
-    const directParentThreadId = typeof session.parent_thread_id === "string" && session.parent_thread_id
-      ? session.parent_thread_id
-      : null;
-    const hasLegacyAgentIdentity = Boolean(
-      agentPathText(session.agent_path)
-      || (typeof session.agent_nickname === "string" && session.agent_nickname)
-      || (typeof session.agent_role === "string" && session.agent_role),
-    );
-    const isLegacyAgent = typeof session.source === "string"
-      && session.source.trim().length > 0
-      && directParentThreadId
-      && hasLegacyAgentIdentity;
-    if (!sourceParentThreadId && !isLegacyAgent) return session;
-
-    return {
-      ...session,
-      agent: {
-        threadId: session.sessionId ?? null,
-        parentThreadId: sourceParentThreadId ?? directParentThreadId,
-        sourceParentThreadId,
-        conflict: Boolean(sourceParentThreadId && directParentThreadId && sourceParentThreadId !== directParentThreadId),
-        agentPath: agentPathText(session.agent_path) ?? agentPathText(spawn?.agent_path),
-        nickname: session.agent_nickname ?? spawn?.agent_nickname ?? null,
-        role: session.agent_role ?? spawn?.agent_role ?? null,
-        depth: Number.isSafeInteger(spawn?.depth) ? spawn.depth : null,
-      },
-    };
-  });
-  const byThreadId = new Map(withAgent.map((session) => [String(session.sessionId), session]));
-  return withAgent.map((session) => {
-    const agent = session.agent;
-    if (!agent?.parentThreadId) return session;
-    const parent = agent.conflict ? null : byThreadId.get(String(agent.parentThreadId));
-    return {
-      ...session,
-      projectCwd: session.projectCwd || session.cwd || parent?.cwd || "",
-      agent: {
-        ...agent,
-        parentSessionId: agent.parentSessionId ?? parent?.id ?? null,
-        parentTitle: agent.parentTitle || parent?.title || parent?.preview || null,
-      },
-    };
-  });
-}
-
-export function normalizedAgentPath(session) {
-  const source = serializedSource(session);
-  const spawn = source?.sub_agent?.thread_spawn ?? source?.subagent?.thread_spawn;
-  const agentPath = agentPathText(session.agent?.agentPath)
-    ?? agentPathText(session.agent_path)
-    ?? agentPathText(spawn?.agent_path);
-  return agentPath?.replace(/^\/root\//, "") || null;
-}
-
-export function sessionDisplayTitle(session, fallback = session.title || session.preview) {
-  const agentPath = session.agent ? normalizedAgentPath(session) : null;
-  if (agentPath) return agentPath;
-  return session.title || session.preview || fallback || "未命名会话";
-}
-
-export function sessionKindLabel(session) {
-  if (session.guardian) return "Guardian会话";
-  return session.agent ? "子代理会话" : "主会话";
 }
 
 export function groupSessionsByProject(sessions, search = "") {
