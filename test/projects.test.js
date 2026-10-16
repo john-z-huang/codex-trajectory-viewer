@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { groupSessionsByProject, normalizeSessionAgents, sessionDisplayTitle, sessionKindLabel } from "../src/lib/projects.js";
+import { groupSessionsByProject } from "../src/lib/projects.js";
+import { normalizeSessionAgents, sessionDisplayTitle, sessionKindLabel } from "../src/lib/session-identity.js";
 
 const sessions = [
   { id: "active-new", cwd: "/work/alpha", title: "最近活动", timestamp: "2026-04-03T10:00:00Z", archived: false },

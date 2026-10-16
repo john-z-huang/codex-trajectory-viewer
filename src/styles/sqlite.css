@@ -1,0 +1,90 @@
+.sqlite-section {
+  max-width: 960px;
+  margin-top: 30px;
+}
+
+.sqlite-sources {
+  display: grid;
+  gap: 10px;
+}
+
+.sqlite-source {
+  border: 1px solid #e5e6e9;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px 14px;
+}
+
+.sqlite-source-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+}
+
+.source-ok {
+  color: #438968;
+  font-size: 10px;
+}
+
+.source-muted,.source-note {
+  color: #999ba2;
+  font-size: 10px;
+}
+
+.source-note {
+  margin: 8px 0;
+}
+
+.sqlite-table {
+  border-top: 1px solid #f0f0f2;
+  margin-top: 9px;
+  padding-top: 8px;
+}
+
+.sqlite-table summary {
+  cursor: pointer;
+  font-size: 10px;
+  color: #555860;
+}
+
+.sqlite-table summary span {
+  color: #999ba2;
+  margin-left: 8px;
+}
+
+.sqlite-row {
+  font: 10px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 280px;
+  overflow: auto;
+  background: #f7f7f8;
+  border-radius: 5px;
+  padding: 10px;
+}
+
+.history-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+  color: #898c94;
+  font-size: 10px;
+}
+
+.history-pager button {
+  border: 1px solid #e1e2e6;
+  background: #fff;
+  border-radius: 5px;
+  padding: 5px 9px;
+  color: #474951;
+  font: inherit;
+  cursor: pointer;
+}
+
+.history-pager button:disabled {
+  opacity: .45;
+  cursor: default;
+}

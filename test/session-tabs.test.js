@@ -50,7 +50,10 @@ test("closing the active tab selects a neighbor and closing the last tab returns
 });
 
 test("sidebar and open session panels own separate vertical scroll areas", async () => {
-  const css = await readFile(new URL("../src/style.css", import.meta.url), "utf8");
+  const entry = new URL("../src/style.css", import.meta.url);
+  const stylesheet = await readFile(entry, "utf8");
+  const imports = [...stylesheet.matchAll(/@import\s+["'](.+?)["'];/g)];
+  const css = (await Promise.all(imports.map(([, path]) => readFile(new URL(path, entry), "utf8")))).join("\n");
   const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)];
   const declarationsFor = (selector) => rules
     .filter(([, selectors]) => selectors.trim().split(",").some((item) => item.trim() === selector))
