@@ -2,25 +2,36 @@ import { readFile } from "node:fs/promises";
 import { readSessionSupplement, readThreadSummaries } from "./sqlite-reader.js";
 import { linkSubagents, subagentActivityFromRollout } from "./subagents.js";
 import { discoverSessions, mergeThreadSummary } from "./session-discovery.js";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Session, SessionSummary } from "./types.js";
 
-function sendJson(response, status, body) {
+interface SessionApiOptions {
+  request: IncomingMessage;
+  response: ServerResponse;
+  url: URL;
+  home: string;
+  sqliteHome: string;
+}
+
+function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
 }
 
-export async function handleSessionApi({ request, response, url, home, sqliteHome }) {
+export async function handleSessionApi({ request, response, url, home, sqliteHome }: SessionApiOptions): Promise<boolean> {
   if (url.pathname === "/api/sessions") {
-    const sessions = await discoverSessions(home);
+    const sessions: Session[] = await discoverSessions(home);
     const threads = await readThreadSummaries(sqliteHome, sessions);
-    const summaries = sessions.map((session) => mergeThreadSummary(session, threads.get(String(session.sessionId))));
+    const summaries: SessionSummary[] = sessions.map((session) => mergeThreadSummary(session, threads.get(String(session.sessionId))));
     const sessionsByThreadId = new Map(summaries.map((session) => [String(session.sessionId), session]));
     for (const session of summaries) {
-      const parentThreadId = session.agent?.parentThreadId;
+      const agent = session.agent;
+      const parentThreadId = agent?.parentThreadId;
       if (!parentThreadId) continue;
-      const parent = session.agent.conflict ? null : sessionsByThreadId.get(String(parentThreadId));
+      const parent = agent.conflict ? null : sessionsByThreadId.get(String(parentThreadId));
       session.projectCwd = session.cwd || parent?.cwd || "";
       session.agent = {
-        ...session.agent,
+        ...agent,
         parentSessionId: parent?.id ?? null,
         parentTitle: parent?.title || parent?.preview || null,
       };
@@ -48,7 +59,7 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
   const contents = await readFile(match._path, "utf8");
   const thread = (await readThreadSummaries(sqliteHome, [match])).get(String(match.sessionId));
   const linkedSubagents = linkSubagents(match, sessions, subagentActivityFromRollout(contents));
-  const childSessions = linkedSubagents.map((link) => link.session).filter(Boolean);
+  const childSessions = linkedSubagents.map((link) => link.session).filter((session): session is Session => session !== null);
   const childThreads = await readThreadSummaries(sqliteHome, childSessions);
   const requestedHistoryPage = Number(url.searchParams.get("historyPage") ?? 1);
   const historyPage = Number.isSafeInteger(requestedHistoryPage) && requestedHistoryPage > 0

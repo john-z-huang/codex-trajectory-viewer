@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createAppServer, discoverSessions } from "../server/index.js";
+import { createAppServer, discoverSessions } from "../server-dist/index.js";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 

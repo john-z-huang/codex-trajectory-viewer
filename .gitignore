@@ -4,3 +4,7 @@ dist/
 
 # Serena memories may contain local filesystem paths.
 .serena/
+
+# VS Code
+.vscode
+server-dist/

@@ -1,14 +1,26 @@
 import { createReadStream } from "node:fs";
 import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+// @ts-expect-error This shared legacy JavaScript helper is intentionally outside the server-only TS compilation.
 import { previewFromRecord } from "../src/lib/rollout.js";
 import { isGuardianSession, subagentMetadataFromSession } from "./subagents.js";
+import { isJsonRecord, type JsonRecord, type Session, type SessionSummary } from "./types.js";
 
-const encodeId = (relativePath) => Buffer.from(relativePath).toString("base64url");
+const encodeId = (relativePath: string): string => Buffer.from(relativePath).toString("base64url");
 
-async function collectRollouts(home) {
-  const found = [];
-  for (const [directory, archived] of [["sessions", false], ["archived_sessions", true]]) {
+interface RolloutFile {
+  candidate: string;
+  archived: boolean;
+  relativePath: string;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+async function collectRollouts(home: string): Promise<RolloutFile[]> {
+  const found: RolloutFile[] = [];
+  for (const [directory, archived] of [["sessions", false], ["archived_sessions", true]] as const) {
     const base = path.join(home, directory);
     try {
       if (!(await lstat(base)).isDirectory()) continue;
@@ -16,7 +28,7 @@ async function collectRollouts(home) {
       continue;
     }
 
-    async function walk(current) {
+    async function walk(current: string): Promise<void> {
       let entries;
       try {
         entries = await readdir(current, { withFileTypes: true });
@@ -37,7 +49,7 @@ async function collectRollouts(home) {
   return found;
 }
 
-export function mergeThreadSummary(session, row = {}) {
+export function mergeThreadSummary(session: Session, row: JsonRecord = {}): SessionSummary {
   const archived = row.archived == null
     ? session.archived
     : typeof row.archived === "string"
@@ -51,7 +63,7 @@ export function mergeThreadSummary(session, row = {}) {
       ? new Date(updatedAtMs).toISOString()
       : session.timestamp
   );
-  const titleCandidates = [
+  const titleCandidates: unknown[] = [
     row.name,
     row.title,
     session._metadataName,
@@ -61,8 +73,8 @@ export function mergeThreadSummary(session, row = {}) {
     session._initialUserMessage,
     session.preview,
   ];
-  const title = titleCandidates.find((candidate) => typeof candidate === "string" && candidate.trim())?.trim()
-    ?? row.title
+  const title = titleCandidates.find((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0)?.trim()
+    ?? stringValue(row.title)
     ?? session.preview;
   return {
     ...Object.fromEntries(Object.entries(session).filter(([key]) => !key.startsWith("_"))),
@@ -75,10 +87,10 @@ export function mergeThreadSummary(session, row = {}) {
     guardian: Boolean(session._guardian),
     archived,
     updatedAt,
-  };
+  } as SessionSummary;
 }
 
-export async function discoverSessions(home) {
+export async function discoverSessions(home: string): Promise<Session[]> {
   const root = await realpath(home).catch(() => path.resolve(home));
   const files = await collectRollouts(root);
   const sessions = [];
@@ -94,43 +106,46 @@ export async function discoverSessions(home) {
       const basename = path.basename(file.candidate);
       const filenameMatch = basename.match(/^rollout-(?:\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-(.+)\.jsonl$/);
       const filenameSessionId = filenameMatch?.[1] ?? null;
-      let metadata = null;
-      let matchingMetadata = null;
+      let metadata: JsonRecord | null = null;
+      let matchingMetadata: JsonRecord | null = null;
       let preview = "";
       let firstTimestamp = null;
       for (const line of records) {
         try {
-          const record = JSON.parse(line);
-          firstTimestamp ??= record.timestamp ?? null;
+          const parsed: unknown = JSON.parse(line);
+          if (!isJsonRecord(parsed)) continue;
+          const record = parsed;
+          firstTimestamp ??= stringValue(record.timestamp) ?? null;
           if (record.type === "session_meta" || record.type === "session_meta_entry") {
-            metadata = record.payload ?? {};
+            metadata = isJsonRecord(record.payload) ? record.payload : {};
             const metadataId = metadata.id ?? metadata.thread_id;
             if (!matchingMetadata && filenameSessionId && metadataId === filenameSessionId) {
               matchingMetadata = metadata;
             }
           }
-          preview ||= previewFromRecord(record);
+          preview ||= String(previewFromRecord(record) || "");
         } catch {
           // Malformed lines remain available in the detail view.
         }
       }
       metadata = matchingMetadata ?? metadata;
-      const id = metadata?.id ?? metadata?.thread_id ?? filenameSessionId ?? basename;
+      const id = stringValue(metadata?.id) ?? stringValue(metadata?.thread_id) ?? filenameSessionId ?? basename;
+      const metadataInitialMessage = stringValue(metadata?.initial_user_message);
       sessions.push({
         id: encodeId(file.relativePath),
         sessionId: id,
         archived: file.archived,
-        preview: preview || metadata?.initial_user_message || "无用户消息预览",
-        cwd: metadata?.cwd ?? "",
+        preview: preview || metadataInitialMessage || "无用户消息预览",
+        cwd: stringValue(metadata?.cwd) ?? "",
         timestamp: firstTimestamp ?? info.mtime.toISOString(),
         filename: basename,
         _path: resolved,
         _relativePath: file.relativePath,
         _agent: subagentMetadataFromSession(metadata),
         _guardian: isGuardianSession(metadata),
-        _metadataName: metadata?.name,
-        _metadataTitle: metadata?.title,
-        _initialUserMessage: metadata?.initial_user_message,
+        _metadataName: stringValue(metadata?.name),
+        _metadataTitle: stringValue(metadata?.title),
+        _initialUserMessage: metadataInitialMessage,
       });
     } catch {
       // Unreadable files are skipped; discovered files remain strictly allowlisted.

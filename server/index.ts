@@ -2,19 +2,26 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleSessionApi } from "./session-api.js";
 import { serveStaticFile } from "./static-files.js";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 export { discoverSessions } from "./session-discovery.js";
 
-export function createAppServer(options = {}) {
+interface AppServerOptions {
+  home?: string;
+  sqliteHome?: string;
+  root?: string;
+}
+
+export function createAppServer(options: AppServerOptions = {}) {
   const home = options.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
   const sqliteHome = options.sqliteHome ?? process.env.CODEX_SQLITE_HOME ?? home;
   const root = options.root ?? ROOT;
-  const server = createServer(async (request, response) => {
-    const url = new URL(request.url, "http://127.0.0.1");
+  const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Cache-Control", "no-store");
     if (request.method !== "GET") {
