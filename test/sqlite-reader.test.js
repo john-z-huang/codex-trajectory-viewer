@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { readSessionSupplement } from "../server/sqlite-reader.js";
+import { readSessionSupplement } from "../server-dist/sqlite-reader.js";
 
 function createDatabase(file, sql) {
   const db = new DatabaseSync(file);

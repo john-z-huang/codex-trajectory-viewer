@@ -8,11 +8,13 @@
   },
   "scripts": {
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
-    "dev:server": "node server/index.js",
+    "dev:server": "tsc -p tsconfig.server.json && concurrently -k \"tsc -p tsconfig.server.json --watch\" \"node --watch server-dist/index.js\"",
     "dev:client": "vite --host 127.0.0.1",
-    "build": "vite build",
-    "start": "node server/index.js",
-    "test": "node --test"
+    "typecheck:server": "tsc -p tsconfig.server.json --noEmit",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build": "npm run build:server && vite build",
+    "start": "node server-dist/index.js",
+    "test": "npm run build:server && node --test"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -23,6 +25,8 @@
     "vite": "latest"
   },
   "devDependencies": {
-    "happy-dom": "^21.0.1"
+    "@types/node": "22.20.5",
+    "happy-dom": "^21.0.1",
+    "typescript": "6.0.3"
   }
 }

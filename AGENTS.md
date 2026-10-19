@@ -2,10 +2,20 @@
 
 ## 项目目标与技术栈
 
-- 本项目是 Codex 本地运行轨迹查看器：React + Vite 前端和 Node.js 本地 HTTP 服务，使用 JavaScript / JSX（ES modules）。
+- 本项目是 Codex 本地运行轨迹查看器：React + Vite 展示端（JavaScript / JSX）和 Node.js 本地 HTTP 服务（TypeScript 6.x，ES modules）。
 - JSONL rollout 是会话轨迹的规范来源；SQLite 仅提供线程元数据、分页历史与关联目标等补充信息。
 - 服务仅绑定本机回环地址。会话数据不上传、不复制到远端，也不依赖远程服务。
 - 项目分组按会话 cwd 的完整路径字符串进行。优先使用 SQLite `threads.cwd`，缺失时回退到 JSONL `session_meta.cwd`；无 cwd 的会话归入“项目未知”。同名目录必须能通过完整路径区分。只能使用记录中已有的路径字符串，不扫描项目目录、不读取 CODEX_HOME 以外的数据，也不通过 Git remote 推断项目。
+
+## TS/JS 混合开发架构约定
+
+- 项目长期采用混合语言边界：`server/` 服务端使用 TypeScript；`src/` React + Vite 展示端继续使用 JavaScript / JSX。服务端面向浏览器的运行时交互通过现有 HTTP/JSON API；现有 `server/session-discovery.ts` 对 `src/lib/rollout.js` 的预览 helper 依赖继续保留在 JavaScript，且不纳入 TS 编译。
+- 不将 `src/`、Vite 前端配置、样式或整个项目改写为 TypeScript；不批量把 `.js` / `.jsx` 改名为 `.ts` / `.tsx`。只有用户明确作出新的架构决策后，才能改变这条边界。
+- 服务端目标编译器固定为最新稳定的 TypeScript 6.x，不使用 TypeScript 7.x、预览版或 nightly。当前项目锁定 TypeScript 6.0.3；升级时选择当时最新稳定的 6.x 版本，并在 `package.json` 和 lockfile 中精确锁定版本。
+- 服务端 TypeScript 使用独立的 `tsconfig.server.json`，编译范围只包含 `server/`。保留 Node ESM：与 `"type": "module"` 和 `NodeNext` 模块解析一致；TS 源码中的相对 ESM 导入保留可运行时解析的 `.js` 扩展名。
+- 服务端编译产物使用独立的 `server-dist/`，不得与 Vite 的 `dist/` 混用。构建、开发、生产启动和测试须明确消费编译后的服务端 JavaScript；迁移完成后由 `npm start` 启动 `server-dist/index.js`。
+- 测试继续使用 JavaScript 和 Node 内置 `node:test`，不随服务端迁移为 TypeScript。服务端 API 类型首阶段只在服务端维护；展示端继续依赖现有 JSON API，不直接导入服务端 TS 类型。
+- `server/` 的服务端源码使用 `.ts`；下方文件树列出服务端模块。展示端和测试仍使用 JavaScript/JSX，不得据服务端 TypeScript 扩大到全项目重构。
 
 ## 项目结构与模块职责
 
@@ -36,17 +46,18 @@ src/
                                 Markdown、布局、标签和响应式职责拆分的样式
   style.css                     样式模块入口；导入顺序影响 CSS 级联
 server/
-  index.js                      本地 HTTP 服务组合、启动及公开导出
-  session-discovery.js          rollout 发现、摘要和会话身份元数据
-  session-api.js                会话列表/详情 API 及响应组装
-  static-files.js               生产构建静态文件服务
-  sqlite-reader.js               只读 SQLite 元数据、历史和目标读取
-  subagents.js                   子代理发现、关联和活动状态
+  index.ts                      本地 HTTP 服务组合、启动及公开导出
+  session-discovery.ts          rollout 发现、摘要和会话身份元数据
+  session-api.ts                会话列表/详情 API 及响应组装
+  static-files.ts               生产构建静态文件服务
+  sqlite-reader.ts              只读 SQLite 元数据、历史和目标读取
+  subagents.ts                  子代理发现、关联和活动状态
+  types.ts                      服务端输入、会话和响应类型
 test/                            Node 内置测试；数据必须来自隔离的合成 fixtures
 ```
 
 - 新增或修改 UI 时优先放入对应组件；跨组件的详情/分页状态放在 hook，纯数据处理放在 `src/lib/`。
-- `server/index.js` 负责依赖组合和本地服务启动；路由数据处理、rollout 发现与静态文件服务分别维护在独立模块中。保持 `createAppServer`、`discoverSessions` 的现有导出。
+- `server/index.ts` 负责依赖组合和本地服务启动；路由数据处理、rollout 发现与静态文件服务分别维护在独立模块中。保持 `createAppServer`、`discoverSessions` 的现有导出。
 - CSS 从 `src/style.css` 统一导入。拆分或调整导入时须保留既有选择器、声明与级联结果。
 
 ## CODEX_HOME 只读红线
@@ -71,7 +82,7 @@ test/                            Node 内置测试；数据必须来自隔离的
 
 ## 本地开发与验证
 
-- Node.js 版本要求见 `package.json` 的 `engines`；依赖安装后可运行 `npm run dev`，本地 API 和 Vite 均绑定回环地址。
-- `npm test` 运行 Node 内置测试；`npm run build` 生成生产前端；`npm start` 启动生产服务。
+- Node.js 版本要求见 `package.json` 的 `engines`；依赖安装后可运行 `npm run dev`，本地 API 和 Vite 均绑定回环地址。`npm run typecheck:server` 只检查服务端；`npm run build:server` 将服务端 ESM JavaScript 编译到 `server-dist/`；`npm run build` 同时构建服务端和 Vite 前端；`npm start` 启动 `server-dist/index.js`。
+- `npm test` 运行 Node 内置测试，执行前构建服务端；测试文件保持 JavaScript，并通过编译后的服务端模块运行。测试数据必须来自隔离的合成 fixtures。
 - 涉及行为或界面变更时，增加/调整隔离合成数据覆盖对应需求，再运行相关测试和生产构建。不得为测试方便而接入真实 CODEX_HOME。
 - 保持 API/前端本地数据流，不引入上传或遥测会话内容的能力。

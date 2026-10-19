@@ -15,6 +15,8 @@
 
 需要 Node.js `^22.13.0` 或 `>=23.0.0`（内置只读 SQLite reader 与 Vite 8 的运行要求）。
 
+服务端使用锁定版本的 TypeScript 6.x 编译为 Node ESM；React/Vite 展示端保持 JavaScript/JSX。服务端类型检查范围只覆盖 `server/`，构建产物放在 `server-dist/`，与前端 `dist/` 分开。
+
 ```sh
 npm install
 npm run dev
@@ -23,6 +25,7 @@ npm run dev
 开发模式下，Vite 页面和 API 服务分别监听 `127.0.0.1`，浏览器访问 <http://127.0.0.1:5173>。API 服务默认端口为 `4317`，可用 `PORT` 覆盖。
 
 ```sh
+npm run typecheck:server
 npm test
 npm run build
 npm start
@@ -58,12 +61,13 @@ src/
   styles/                      按界面职责拆分的样式
   style.css                    样式模块入口
 server/
-  index.js                     本地 HTTP 服务组合与启动
-  session-discovery.js         会话发现与摘要
-  session-api.js               会话列表和详情 API
-  static-files.js               生产静态文件服务
-  sqlite-reader.js              只读 SQLite 读取
-  subagents.js                  子代理识别与关联
+  index.ts                     本地 HTTP 服务组合与启动
+  session-discovery.ts         会话发现与摘要
+  session-api.ts               会话列表和详情 API
+  static-files.ts              生产静态文件服务
+  sqlite-reader.ts             只读 SQLite 读取
+  subagents.ts                 子代理识别与关联
+  types.ts                     服务端输入、会话和响应类型
 test/                            使用隔离合成数据的 Node 内置测试
 ```
 
