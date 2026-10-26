@@ -26,6 +26,20 @@ function jsonResponse(value) {
   return { ok: true, json: async () => value };
 }
 
+class TestIntersectionObserver {
+  static instances = [];
+
+  constructor(callback, options) {
+    this.callback = callback;
+    this.options = options;
+    this.disconnectCount = 0;
+    TestIntersectionObserver.instances.push(this);
+  }
+
+  observe() {}
+  disconnect() { this.disconnectCount += 1; }
+}
+
 test("子代理侧栏、标签和详情标题统一显示规范化 agent_path", async () => {
   const window = new Window({ url: "http://localhost/" });
   const original = new Map();
@@ -176,6 +190,7 @@ test("Guardian 会话在侧栏显示 Guardian会话而不显示子代理标签",
 });
 
 test("sidebar selection opens a new mounted tab and restores each tab's reading position", async () => {
+  TestIntersectionObserver.instances = [];
   const window = new Window({ url: "http://localhost/" });
   const original = new Map();
   const globals = {
@@ -185,6 +200,7 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
     HTMLElement: window.HTMLElement,
     Node: window.Node,
     MouseEvent: window.MouseEvent,
+    IntersectionObserver: TestIntersectionObserver,
     requestAnimationFrame: window.requestAnimationFrame.bind(window),
     cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
     IS_REACT_ACT_ENVIRONMENT: true,
@@ -194,12 +210,25 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   }
   original.set("fetch", Object.getOwnPropertyDescriptor(globalThis, "fetch"));
+  const detailRequests = new Map();
   globalThis.fetch = async (input) => {
     const url = new URL(String(input), "http://localhost/");
     if (url.pathname === "/api/sessions") return jsonResponse(sessions);
     const sessionId = decodeURIComponent(url.pathname.split("/").at(-1));
+    if (!url.searchParams.has("historyPage")) detailRequests.set(sessionId, (detailRequests.get(sessionId) || 0) + 1);
     const session = sessions.find((item) => item.id === sessionId);
-    return session ? jsonResponse({ ...session, filename: `${sessionId}.jsonl`, contents: longTimeline, supplement: [] }) : { ok: false, status: 404 };
+    if (session && url.searchParams.has("historyPage")) {
+      return jsonResponse({ ...session, filename: `${sessionId}.jsonl`, contents: longTimeline, supplement: [{
+        database: "thread_history_1.sqlite", available: true, tables: [{
+          table: "thread_items", rows: [], pagination: { page: Number(url.searchParams.get("historyPage")), totalRows: 100, hasMore: true },
+        }],
+      }] });
+    }
+    return session ? jsonResponse({ ...session, filename: `${sessionId}.jsonl`, contents: longTimeline, supplement: [{
+      database: "thread_history_1.sqlite", available: true, tables: [{
+        table: "thread_items", rows: [], pagination: { page: 1, totalRows: 100, hasMore: true },
+      }],
+    }] }) : { ok: false, status: 404 };
   };
 
   let vite;
@@ -226,11 +255,28 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
     assert.equal(rootElement.querySelectorAll('[role="tab"]').length, 1);
     assert.equal(rootElement.querySelectorAll(".session-list .session-item").length, sessions.length);
     assert.equal(firstPanel.querySelectorAll(".event-card").length, 120);
+    const firstEvent = firstPanel.querySelector(".event-card");
+    const timelineObserver = TestIntersectionObserver.instances.at(-1);
+    assert.ok(timelineObserver);
+    await act(async () => timelineObserver.callback([{ target: firstEvent, isIntersecting: true, intersectionRatio: 1 }]));
+    const collapseFirstEvent = firstEvent.querySelector('[aria-label="收起第 1 行 JSONL 对象"]');
+    assert.ok(collapseFirstEvent);
+    await act(async () => collapseFirstEvent.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    assert.ok(firstEvent.querySelector(".event-body").classList.contains("collapsed"));
+    const nextHistoryPage = firstPanel.querySelector(".history-pager button:last-child");
+    assert.ok(nextHistoryPage);
+    await act(async () => {
+      nextHistoryPage.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(firstPanel.querySelector(".event-card"), firstEvent);
+    assert.equal(TestIntersectionObserver.instances.at(-1), timelineObserver);
+    assert.equal(timelineObserver.disconnectCount, 0, "supplement-only paging keeps the timeline observer connected");
     firstPanel.scrollTop = 420;
     const sidebar = rootElement.querySelector(".session-list");
     sidebar.scrollTop = 180;
 
-    const secondSessionButton = rootElement.querySelector('[aria-label="在新标签页打开：Session B"]');
+    const secondSessionButton = rootElement.querySelector('[aria-label="打开会话：Session B"]');
     assert.ok(secondSessionButton);
     await act(async () => {
       secondSessionButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -245,27 +291,61 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
     assert.equal(panels[1].hidden, false);
     assert.equal(sidebar.scrollTop, 180);
 
-    const firstTab = [...rootElement.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent.includes("Session A"));
-    assert.ok(firstTab);
+    const panelIdentities = [...panels];
+    const requestsAfterOpen = new Map(detailRequests);
     await act(async () => {
-      firstTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+      secondSessionButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    assert.equal(rootElement.querySelectorAll('[role="tabpanel"]')[1], panelIdentities[1]);
+    assert.deepEqual(detailRequests, requestsAfterOpen, "repeatedly opening the active session starts no detail request");
+
+    const firstSessionButton = rootElement.querySelector('[aria-label="打开会话：Session A"]');
+    const requestsBeforeBackgroundReuse = new Map(detailRequests);
+    await act(async () => {
+      firstSessionButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+      firstSessionButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(rootElement.querySelectorAll('[role="tabpanel"]').length, 2);
+    assert.equal([...rootElement.querySelectorAll('[role="tab"]')].filter((tab) => tab.getAttribute("aria-selected") === "true").length, 1);
+    assert.equal([...rootElement.querySelectorAll('[role="tab"]')].find((tab) => tab.getAttribute("aria-selected") === "true")?.textContent, "Session A");
+    assert.equal(rootElement.querySelector('[role="tabpanel"]'), panelIdentities[0]);
     assert.equal(panels[0].hidden, false);
     assert.equal(panels[0].scrollTop, 420);
+    assert.ok(panels[0].querySelector(".event-body").classList.contains("collapsed"));
+    assert.equal(panels[1].hidden, true);
+    assert.deepEqual(detailRequests, requestsBeforeBackgroundReuse, "repeatedly opening a background session starts no detail request");
+
+    const firstTab = [...rootElement.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent.includes("Session A"));
+    const secondTab = [...rootElement.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent.includes("Session B"));
+    assert.ok(firstTab && secondTab);
+    await act(async () => {
+      secondTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    assert.equal(panels[1].hidden, false);
+    await act(async () => firstTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    assert.equal(panels[0].hidden, false);
     assert.equal(panels[1].hidden, true);
 
     const closeSecondTab = rootElement.querySelector('[aria-label="关闭会话标签：Session B"]');
+    const secondTimelineObserver = TestIntersectionObserver.instances.at(-1);
     await act(async () => {
       closeSecondTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
     assert.equal(rootElement.querySelectorAll('[role="tabpanel"]').length, 1);
     assert.equal(rootElement.querySelector('[role="tab"]').getAttribute("aria-selected"), "true");
     assert.equal(rootElement.querySelector('[role="tabpanel"]').scrollTop, 420);
+    assert.equal(secondTimelineObserver.disconnectCount, 1, "closing a tab disconnects its timeline observer");
 
+    const requestsBeforeReopen = detailRequests.get("session-b");
     await act(async () => {
       secondSessionButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    const reopenedPanel = rootElement.querySelector('[role="tabpanel"]:not([hidden])');
+    assert.notEqual(reopenedPanel, panelIdentities[1], "reopening after close creates a fresh panel instance");
+    assert.ok(detailRequests.get("session-b") > requestsBeforeReopen, "reopening after close fetches fresh detail");
     const activeTabClose = rootElement.querySelector('[aria-label="关闭会话标签：Session B"]');
     await act(async () => {
       activeTabClose.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -314,6 +394,7 @@ test("父会话中的子代理入口打开独立标签并呈现子代理身份�
     { id: "parent-file", sessionId: "parent-id", title: "Parent session", preview: "Parent", cwd: "/project", timestamp: "2026-10-15T00:00:00Z" },
     { id: "child-file", sessionId: "child-id", title: "Research child", preview: "Child", cwd: "/project", timestamp: "2026-10-15T00:01:00Z", source: JSON.stringify({ subagent: { thread_spawn: { parent_thread_id: "parent-id", agent_path: "/root/research/worker", agent_role: "explorer" } } }) },
   ];
+  let childDetailRequests = 0;
   globalThis.fetch = async (input) => {
     const url = new URL(String(input), "http://localhost/");
     if (url.pathname === "/api/sessions") return jsonResponse(sessions);
@@ -322,10 +403,13 @@ test("父会话中的子代理入口打开独立标签并呈现子代理身份�
       ...sessions[0], filename: "parent.jsonl", contents: "", supplement: [],
       subagents: [{ ...sessions[1], agent: { parentThreadId: "parent-id", parentSessionId: "parent-file", parentTitle: "Parent session", agentPath: "/root/research/worker", role: "explorer" }, threadId: "child-id", activityStatus: "completed", available: true, reason: null }],
     });
-    if (id === "child-file") return jsonResponse({
+    if (id === "child-file") {
+      childDetailRequests += 1;
+      return jsonResponse({
       ...sessions[1], agent: { parentThreadId: "parent-id", parentSessionId: "parent-file", parentTitle: "Parent session", agentPath: "/root/research/worker", role: "explorer" }, filename: "child.jsonl", contents: JSON.stringify({ timestamp: "2026-10-15T00:01:00Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "input_text", text: "child only record" }] } }),
       supplement: [], subagents: [],
-    });
+      });
+    }
     return { ok: false, status: 404 };
   };
 
@@ -360,6 +444,14 @@ test("父会话中的子代理入口打开独立标签并呈现子代理身份�
     assert.equal(rootElement.querySelectorAll('[role="tab"]').length, 2);
     assert.match(rootElement.querySelector('[role="tabpanel"]:not([hidden])').textContent, /child only record/);
     assert.match(rootElement.querySelector('[role="tabpanel"]:not([hidden]) .agent-context').textContent, /research\/worker/);
+    const childRequestsBeforeSidebarOpen = childDetailRequests;
+    await act(async () => {
+      childSessionRow.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(rootElement.querySelectorAll('[role="tab"]').length, 2);
+    assert.equal(childDetailRequests, childRequestsBeforeSidebarOpen);
+    assert.match(rootElement.querySelector('[role="tabpanel"]:not([hidden])').textContent, /child only record/);
   } finally {
     if (root) await act(async () => root.unmount());
     if (vite) await vite.close();

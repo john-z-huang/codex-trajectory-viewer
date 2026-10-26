@@ -46,7 +46,7 @@ export function SessionSidebar({
                 key={session.id}
                 className={`session-item ${activeSessionId === session.id ? "active" : ""}`}
                 onClick={() => onOpenSession(session.id)}
-                aria-label={`在新标签页打开：${sessionDisplayTitle(session)}${session.guardian ? "，Guardian会话" : session.agent ? `，子代理会话，父会话：${session.agent.parentTitle || session.agent.parentThreadId || "未知"}` : ""}`}
+                aria-label={`打开会话：${sessionDisplayTitle(session)}${session.guardian ? "，Guardian会话" : session.agent ? `，子代理会话，父会话：${session.agent.parentTitle || session.agent.parentThreadId || "未知"}` : ""}`}
               >
                 <span
                   className={`session-icon ${session.archived ? "archived" : ""}`}

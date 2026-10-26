@@ -3,9 +3,14 @@ export function createEmptySessionTabs() {
 }
 
 export function sessionTabsReducer(state, action) {
-  switch (action.type) {
+  switch (action?.type) {
     case "open": {
-      if (!action.sessionId || !action.id || state.tabs.some((tab) => tab.id === action.id)) return state;
+      if (typeof action.sessionId !== "string" || !action.sessionId.trim()) return state;
+      const existing = state.tabs.find((tab) => tab.sessionId === action.sessionId);
+      if (existing) {
+        return state.activeTabId === existing.id ? state : { ...state, activeTabId: existing.id };
+      }
+      if (!action.id || state.tabs.some((tab) => tab.id === action.id)) return state;
       const tab = { id: action.id, sessionId: action.sessionId };
       return { tabs: [...state.tabs, tab], activeTabId: tab.id };
     }

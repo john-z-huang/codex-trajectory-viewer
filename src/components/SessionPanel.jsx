@@ -5,7 +5,7 @@ import { SessionDetail } from "./SessionDetail.jsx";
 
 export function SessionPanel({ sessionId, refreshVersion, onOpenSession }) {
   const { detail, loading, error, historyLoading, loadHistoryPage } = useSessionDetail(sessionId, refreshVersion);
-  const timeline = useMemo(() => detail ? parseRolloutText(detail.contents) : [], [detail]);
+  const timeline = useMemo(() => detail ? parseRolloutText(detail.contents) : [], [detail?.contents]);
 
   if (!detail) {
     if (error) return <div className="tab-state"><div className="error-banner" role="alert">{error}</div></div>;
