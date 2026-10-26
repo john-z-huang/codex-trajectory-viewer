@@ -13,16 +13,23 @@ test("opening a session creates and activates a new tab without replacing prior 
   assert.equal(state.activeTabId, "tab-b");
 });
 
-test("session tabs may be opened more than once and activation ignores unknown ids", () => {
+test("opening an existing session reactivates its original tab and activation ignores unknown ids", () => {
   let state = createEmptySessionTabs();
   state = sessionTabsReducer(state, { type: "open", id: "tab-a", sessionId: "session-a" });
-  state = sessionTabsReducer(state, { type: "open", id: "tab-b", sessionId: "session-a" });
+  const firstTab = state.tabs[0];
+  state = sessionTabsReducer(state, { type: "open", id: "tab-b", sessionId: "session-b" });
+  const afterSecondOpen = state;
+  state = sessionTabsReducer(state, { type: "open", id: "tab-new", sessionId: "session-a" });
+  assert.deepEqual(state, { tabs: afterSecondOpen.tabs, activeTabId: "tab-a" });
+  assert.deepEqual(state.tabs, [firstTab, { id: "tab-b", sessionId: "session-b" }]);
+  assert.equal(sessionTabsReducer(state, { type: "open", id: "tab-another", sessionId: "session-a" }), state);
+  assert.equal(sessionTabsReducer(state, { type: "open", id: "tab-invalid", sessionId: " " }), state);
   const beforeUnknownActivation = state;
   state = sessionTabsReducer(state, { type: "activate", id: "missing" });
 
   assert.equal(state, beforeUnknownActivation);
-  assert.deepEqual(state.tabs.map((tab) => tab.sessionId), ["session-a", "session-a"]);
-  assert.equal(state.activeTabId, "tab-b");
+  assert.deepEqual(state.tabs.map((tab) => tab.sessionId), ["session-a", "session-b"]);
+  assert.equal(state.activeTabId, "tab-a");
 });
 
 test("closing a non-active tab preserves the selected tab", () => {

@@ -13,6 +13,7 @@ class TestIntersectionObserver {
     this.callback = callback;
     this.options = options;
     this.targets = new Set();
+    this.disconnectCount = 0;
     TestIntersectionObserver.instances.push(this);
   }
 
@@ -21,6 +22,7 @@ class TestIntersectionObserver {
   }
 
   disconnect() {
+    this.disconnectCount += 1;
     this.targets.clear();
   }
 
@@ -273,7 +275,6 @@ test("JSONL 对象卡片独立收起、定位首末对象，并只在可见活�
     assert.equal(window.getComputedStyle(controls).zIndex, "2");
     assert.equal(window.getComputedStyle(controls).visibility, "visible");
     assert.equal(timers.size, 0);
-    restoreTimers();
 
     await act(async () => cards[0].querySelector('[aria-label="展开第 1 行 JSONL 对象"]')
       .dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
@@ -304,6 +305,14 @@ test("JSONL 对象卡片独立收起、定位首末对象，并只在可见活�
     await act(async () => observer.report(cards[0], false));
     assert.equal(cards[0].querySelector(".event-controls"), controls);
     assert.equal(controls.getAttribute("aria-hidden"), "true");
+
+    await act(async () => cards[0].querySelector('[aria-label="收起第 1 行 JSONL 对象"]')
+      .dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    assert.equal(timers.size, 1, "an active collapse highlight owns one pending timer");
+    await act(async () => root.unmount());
+    root = null;
+    assert.equal(timers.size, 0, "unmount clears pending highlight timers");
+    assert.equal(observer.disconnectCount, 1, "unmount disconnects the timeline observer");
   } finally {
     restoreTimers?.();
     if (root) await act(async () => root.unmount());
