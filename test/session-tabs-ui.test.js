@@ -279,9 +279,9 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    const firstPanel = rootElement.querySelector('[role="tabpanel"]');
+    const firstPanel = rootElement.querySelector('.session-tab-panels > [role="tabpanel"]');
     assert.ok(firstPanel);
-    assert.equal(rootElement.querySelectorAll('[role="tab"]').length, 1);
+    assert.equal(rootElement.querySelectorAll('.session-tabs [role="tab"]').length, 1);
     assert.ok(rootElement.querySelectorAll(".session-list .session-item").length <= 100);
     assert.ok(rootElement.querySelectorAll(".session-list .session-item").length > 0);
     assert.ok(firstPanel.querySelectorAll(".event-card").length <= 100);
@@ -316,7 +316,7 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    const panels = [...rootElement.querySelectorAll('[role="tabpanel"]')];
+    const panels = [...rootElement.querySelectorAll('.session-tab-panels > [role="tabpanel"]')];
     assert.equal(panels.length, 2);
     assert.equal(panels[0].hidden, true);
     assert.equal(panels[0].scrollTop, 420);
@@ -331,7 +331,7 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
       secondSessionButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.equal(rootElement.querySelectorAll('[role="tabpanel"]')[1], panelIdentities[1]);
+    assert.equal(rootElement.querySelectorAll('.session-tab-panels > [role="tabpanel"]')[1], panelIdentities[1]);
     assert.deepEqual(detailRequests, requestsAfterOpen, "repeatedly opening the active session starts no detail request");
 
     const firstSessionButton = rootElement.querySelector('[aria-label="打开会话：Session A"]');
@@ -341,18 +341,18 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
       firstSessionButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.equal(rootElement.querySelectorAll('[role="tabpanel"]').length, 2);
-    assert.equal([...rootElement.querySelectorAll('[role="tab"]')].filter((tab) => tab.getAttribute("aria-selected") === "true").length, 1);
-    assert.equal([...rootElement.querySelectorAll('[role="tab"]')].find((tab) => tab.getAttribute("aria-selected") === "true")?.textContent, "Session A");
-    assert.equal(rootElement.querySelector('[role="tabpanel"]'), panelIdentities[0]);
+    assert.equal(rootElement.querySelectorAll('.session-tab-panels > [role="tabpanel"]').length, 2);
+    assert.equal([...rootElement.querySelectorAll('.session-tabs [role="tab"]')].filter((tab) => tab.getAttribute("aria-selected") === "true").length, 1);
+    assert.equal([...rootElement.querySelectorAll('.session-tabs [role="tab"]')].find((tab) => tab.getAttribute("aria-selected") === "true")?.textContent, "Session A");
+    assert.equal(rootElement.querySelector('.session-tab-panels > [role="tabpanel"]'), panelIdentities[0]);
     assert.equal(panels[0].hidden, false);
     assert.equal(panels[0].scrollTop, 420);
     assert.ok(panels[0].querySelector(".event-body").classList.contains("collapsed"));
     assert.equal(panels[1].hidden, true);
     assert.deepEqual(detailRequests, requestsBeforeBackgroundReuse, "repeatedly opening a background session starts no detail request");
 
-    const firstTab = [...rootElement.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent.includes("Session A"));
-    const secondTab = [...rootElement.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent.includes("Session B"));
+    const firstTab = [...rootElement.querySelectorAll('.session-tabs [role="tab"]')].find((tab) => tab.textContent.includes("Session A"));
+    const secondTab = [...rootElement.querySelectorAll('.session-tabs [role="tab"]')].find((tab) => tab.textContent.includes("Session B"));
     assert.ok(firstTab && secondTab);
     await act(async () => {
       secondTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -369,9 +369,9 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
     await act(async () => {
       closeSecondTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
-    assert.equal(rootElement.querySelectorAll('[role="tabpanel"]').length, 1);
-    assert.equal(rootElement.querySelector('[role="tab"]').getAttribute("aria-selected"), "true");
-    assert.equal(rootElement.querySelector('[role="tabpanel"]').scrollTop, 420);
+    assert.equal(rootElement.querySelectorAll('.session-tab-panels > [role="tabpanel"]').length, 1);
+    assert.equal(rootElement.querySelector('.session-tabs [role="tab"]').getAttribute("aria-selected"), "true");
+    assert.equal(rootElement.querySelector('.session-tab-panels > [role="tabpanel"]').scrollTop, 420);
     assert.equal(secondTimelineObserver.disconnectCount, 1, "backgrounding a tab disconnects its timeline observer before close");
 
     const requestsBeforeReopen = detailRequests.get("session-b");
@@ -379,22 +379,22 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
       secondSessionButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    const reopenedPanel = rootElement.querySelector('[role="tabpanel"]:not([hidden])');
+    const reopenedPanel = rootElement.querySelector('.session-tab-panels > [role="tabpanel"]:not([hidden])');
     assert.notEqual(reopenedPanel, panelIdentities[1], "reopening after close creates a fresh panel instance");
     assert.ok(detailRequests.get("session-b") > requestsBeforeReopen, "reopening after close fetches fresh detail");
     const activeTabClose = rootElement.querySelector('[aria-label="关闭会话标签：Session B"]');
     await act(async () => {
       activeTabClose.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
-    assert.equal(rootElement.querySelectorAll('[role="tabpanel"]').length, 1);
-    assert.equal(rootElement.querySelector('[role="tab"]').textContent, "Session A");
-    assert.equal(rootElement.querySelector('[role="tabpanel"]').scrollTop, 420);
+    assert.equal(rootElement.querySelectorAll('.session-tab-panels > [role="tabpanel"]').length, 1);
+    assert.equal(rootElement.querySelector('.session-tabs [role="tab"]').textContent, "Session A");
+    assert.equal(rootElement.querySelector('.session-tab-panels > [role="tabpanel"]').scrollTop, 420);
 
     const closeLastTab = rootElement.querySelector('[aria-label="关闭会话标签：Session A"]');
     await act(async () => {
       closeLastTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
-    assert.equal(rootElement.querySelectorAll('[role="tabpanel"]').length, 0);
+    assert.equal(rootElement.querySelectorAll('.session-tab-panels > [role="tabpanel"]').length, 0);
     assert.match(rootElement.querySelector(".welcome h1").textContent, /选择一个会话/);
   } finally {
     if (root) await act(async () => root.unmount());
@@ -471,17 +471,17 @@ test("父会话中的子代理入口打开独立标签并呈现子代理身份�
       openChild.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.equal(rootElement.querySelectorAll('[role="tab"]').length, 2);
-    assert.match(rootElement.querySelector('[role="tabpanel"]:not([hidden])').textContent, /child only record/);
-    assert.match(rootElement.querySelector('[role="tabpanel"]:not([hidden]) .agent-context').textContent, /research\/worker/);
+    assert.equal(rootElement.querySelectorAll('.session-tabs [role="tab"]').length, 2);
+    assert.match(rootElement.querySelector('.session-tab-panels > [role="tabpanel"]:not([hidden])').textContent, /child only record/);
+    assert.match(rootElement.querySelector('.session-tab-panels > [role="tabpanel"]:not([hidden]) .agent-context').textContent, /research\/worker/);
     const childRequestsBeforeSidebarOpen = childDetailRequests;
     await act(async () => {
       childSessionRow.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.equal(rootElement.querySelectorAll('[role="tab"]').length, 2);
+    assert.equal(rootElement.querySelectorAll('.session-tabs [role="tab"]').length, 2);
     assert.equal(childDetailRequests, childRequestsBeforeSidebarOpen);
-    assert.match(rootElement.querySelector('[role="tabpanel"]:not([hidden])').textContent, /child only record/);
+    assert.match(rootElement.querySelector('.session-tab-panels > [role="tabpanel"]:not([hidden])').textContent, /child only record/);
   } finally {
     if (root) await act(async () => root.unmount());
     if (vite) await vite.close();

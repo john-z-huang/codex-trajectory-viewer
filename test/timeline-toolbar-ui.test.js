@@ -56,7 +56,7 @@ test("上下时间线工具栏共享分页状态和导航，底部按钮可翻�
       root.render(React.createElement(Timeline, {
         entries: makeEntries(startLine, 32),
         sessionId: "synthetic-session",
-        active: false,
+        active: true,
         rollout: { revision: "synthetic-revision", totalLines: 64, pageSize: 32, startLine },
         pageLoading,
         searchLoading,

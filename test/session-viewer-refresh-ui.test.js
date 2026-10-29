@@ -105,7 +105,7 @@ test("刷新状态覆盖列表与全部详情请求，列表失败和关闭标�
     assert.equal(detailCalls.length, 2);
     assert.equal(host.querySelector(".refresh-button").textContent, "刷新中…");
 
-    const oldPanelTabId = host.querySelector('[role="tab"]').id;
+    const oldPanelTabId = host.querySelector('.session-tabs [role="tab"]').id;
     await act(async () => {
       host.querySelector(".session-tab-close").click();
       host.querySelector(".session-list .session-item").click();
@@ -113,7 +113,7 @@ test("刷新状态覆盖列表与全部详情请求，列表失败和关闭标�
     await settleReact();
     assert.equal(detailCalls.length, 3, "reopening the same session creates a distinct panel request");
     assert.equal(detailCalls[1].signal.aborted, true);
-    assert.equal(host.querySelector('[role="tab"]').id === oldPanelTabId, false);
+    assert.equal(host.querySelector('.session-tabs [role="tab"]').id === oldPanelTabId, false);
     detailCalls[1].body.resolve(windowPayload({ id: "synthetic-session-id", sessionId: "synthetic-thread-id", title: "Synthetic session" }, "late old panel"));
     await settleReact();
     assert.equal(host.querySelector(".refresh-button").textContent, "刷新中…", "late settlement from the closed tab cannot clear its replacement");
@@ -252,7 +252,7 @@ test("10 个打开标签刷新时 JSON body 并发不超过两个，全部 settl
         await settleReact();
       });
     }
-    assert.equal(host.querySelectorAll('[role="tab"]').length, 10);
+    assert.equal(host.querySelectorAll('.session-tabs [role="tab"]').length, 10);
     assert.equal(host.querySelectorAll('[role="tabpanel"] .event-card').length, 10);
 
     refreshMode = true;

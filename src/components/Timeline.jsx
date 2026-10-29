@@ -107,6 +107,7 @@ export function Timeline({
   const currentPage = totalLines > 0 ? Math.floor(((rollout?.startLine || entries[0]?.lineNumber || 1) - 1) / pageSize) + 1 : 0;
   const totalPages = totalLines > 0 ? Math.ceil(totalLines / pageSize) : 0;
   const timelineRef = useRef(null);
+  const activeRef = useRef(active);
   const observerGenerationRef = useRef(0);
   const readingStateRef = useRef(new Map());
   const readingScopeRef = useRef(revision);
@@ -121,6 +122,7 @@ export function Timeline({
   const [findStatus, setFindStatus] = useState("");
   const [jumpValue, setJumpValue] = useState("");
   const [focusRequest, setFocusRequest] = useState(0);
+  activeRef.current = active;
   const getScrollElement = useCallback(() => timelineRef.current?.closest(".session-tab-panel") ?? null, []);
   const getMetrics = useCallback((list, panel) => timelineMetrics(list, panel), []);
   const virtualWindow = useVirtualWindow({
@@ -206,6 +208,7 @@ export function Timeline({
   }, [active, entryKeys, getScrollElement, virtualWindow.range.start, virtualWindow.range.end]);
 
   useLayoutEffect(() => {
+    if (!active) return;
     const pendingNavigation = pendingNavigationRef.current;
     if (pendingNavigation) {
       const index = entries.findIndex((entry) => entry.lineNumber === pendingNavigation.lineNumber);
@@ -216,6 +219,9 @@ export function Timeline({
           pendingFocusRef.current = { lineNumber: pendingNavigation.lineNumber };
           setFocusRequest((current) => current + 1);
         }
+      } else if (!pendingNavigation.pageRequested && onNavigateLine) {
+        pendingNavigationRef.current = { ...pendingNavigation, pageRequested: true };
+        void onNavigateLine(pendingNavigation.lineNumber);
       }
     }
 
@@ -237,9 +243,10 @@ export function Timeline({
       top: Math.max(0, Math.min(targetTop, maxScrollTop)),
       behavior: "smooth",
     });
-  }, [entries, readingRevision, virtualWindow.scrollToIndex]);
+  }, [active, entries, onNavigateLine, readingRevision, virtualWindow.scrollToIndex]);
 
   useLayoutEffect(() => {
+    if (!active) return;
     const pending = pendingFocusRef.current;
     if (pending) {
       pendingFocusRef.current = null;
@@ -262,7 +269,7 @@ export function Timeline({
     // keyboard focus must not undo a user's scroll to the next records.
     card?.focus({ preventScroll: true });
     if (card) focusedEntryRef.current = { lineNumber: Number(card.dataset.lineNumber), index };
-  }, [focusRequest, entries, virtualWindow.range.start, virtualWindow.range.end]);
+  }, [active, focusRequest, entries, virtualWindow.range.start, virtualWindow.range.end]);
 
   const updateReadingState = useCallback((entryId, update) => {
     const current = readingStateRef.current.get(entryId) ?? defaultReadingState();
@@ -317,6 +324,11 @@ export function Timeline({
   const navigateLine = useCallback((lineNumber, align = "start", moveFocus = false) => {
     if (!Number.isSafeInteger(lineNumber) || lineNumber < 1 || lineNumber > totalLines) return;
     const index = entries.findIndex((entry) => entry.lineNumber === lineNumber);
+    if (!activeRef.current) {
+      pendingNavigationRef.current = { lineNumber, align, moveFocus, pageRequested: false };
+      if (moveFocus) pendingFocusRef.current = { lineNumber };
+      return;
+    }
     if (index >= 0) {
       if (moveFocus) {
         pendingFocusRef.current = { lineNumber };
@@ -325,9 +337,9 @@ export function Timeline({
       virtualWindow.scrollToIndex(index, align);
       return;
     }
-    pendingNavigationRef.current = { lineNumber, align, moveFocus };
+    pendingNavigationRef.current = { lineNumber, align, moveFocus, pageRequested: true };
     if (onNavigateLine) void onNavigateLine(lineNumber);
-  }, [entries, onNavigateLine, totalLines, virtualWindow.scrollToIndex]);
+  }, [active, entries, onNavigateLine, totalLines, virtualWindow.scrollToIndex]);
 
   const scrollToEntry = useCallback((event, edge) => {
     const lineNumber = edge === "first" ? 1 : totalLines;

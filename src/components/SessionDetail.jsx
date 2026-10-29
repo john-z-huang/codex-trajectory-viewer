@@ -1,5 +1,6 @@
 import { agentStatusLabel, formatDate } from "../lib/formatters.js";
 import { sessionDisplayTitle } from "../lib/session-identity.js";
+import { SessionSourceTabs } from "./SessionSourceTabs.jsx";
 import { SqliteSupplement } from "./SqliteSupplement.jsx";
 import { Timeline } from "./Timeline.jsx";
 
@@ -88,22 +89,29 @@ export function SessionDetail({
         </section>
       )}
 
-      <Timeline
-        entries={timeline}
-        rollout={rollout}
-        currentLine={currentLine}
-        pageLoading={pageLoading}
-        searchLoading={searchLoading}
-        sessionId={detail.id}
+      <SessionSourceTabs
         active={active}
-        onNavigateLine={onNavigateLine}
-        onSearch={onSearch}
-        onRevisionStale={onRevisionStale}
-      />
-      <SqliteSupplement
-        sources={detail.supplement}
-        historyLoading={historyLoading}
-        onLoadHistoryPage={onLoadHistoryPage}
+        jsonl={(sourceActive) => (
+          <Timeline
+            entries={timeline}
+            rollout={rollout}
+            currentLine={currentLine}
+            pageLoading={pageLoading}
+            searchLoading={searchLoading}
+            sessionId={detail.id}
+            active={sourceActive}
+            onNavigateLine={onNavigateLine}
+            onSearch={onSearch}
+            onRevisionStale={onRevisionStale}
+          />
+        )}
+        sqlite={(
+          <SqliteSupplement
+            sources={detail.supplement}
+            historyLoading={historyLoading}
+            onLoadHistoryPage={onLoadHistoryPage}
+          />
+        )}
       />
     </>
   );

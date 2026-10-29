@@ -1,34 +1,41 @@
 import { useState } from "react";
+import { SqliteHistoryCard } from "./SqliteHistoryCard.jsx";
 
 function SqliteTable({ table, historyLoading, onLoadHistoryPage }) {
   const [open, setOpen] = useState(false);
+  const rows = Array.isArray(table.rows) ? table.rows : [];
 
   return (
     <details className="sqlite-table" onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>
         {table.table}
-        <span>{table.rows?.length ? `${table.rows.length} 条` : table.reason ?? "没有关联记录"}</span>
+        <span>{rows.length ? `${rows.length} 条` : table.reason ?? "没有关联记录"}</span>
       </summary>
       {open && table.reason && <p className="source-note">{table.reason}</p>}
-      {open && table.rows?.slice(0, 50).map((row, index) => {
-        const serializedRow = JSON.stringify(row, null, 2);
-        return (
-          <pre className="sqlite-row" key={`${table.table}-${index}`}>
-            {serializedRow.slice(0, 12_000)}
-            {serializedRow.length > 12_000 ? "… [row truncated]" : ""}
-          </pre>
-        );
-      })}
+      {open && (
+        <div className="sqlite-history-cards">
+          {rows.map((row, index) => (
+            <SqliteHistoryCard
+              table={table.table}
+              row={row}
+              index={index}
+              key={`${table.table}-${row?.item_id ?? row?.turn_id ?? row?.goal_id ?? index}-${index}`}
+            />
+          ))}
+        </div>
+      )}
       {open && table.pagination && (
         <div className="history-pager">
           <span>第 {table.pagination.page} 页，共 {table.pagination.totalRows} 条</span>
           <button
+            type="button"
             onClick={() => onLoadHistoryPage(table.pagination.page - 1)}
             disabled={historyLoading || table.pagination.page <= 1}
           >
             上一页
           </button>
           <button
+            type="button"
             onClick={() => onLoadHistoryPage(table.pagination.page + 1)}
             disabled={historyLoading || !table.pagination.hasMore}
           >
