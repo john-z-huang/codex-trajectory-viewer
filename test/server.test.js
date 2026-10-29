@@ -239,13 +239,15 @@ test("在父会话中关联并读取子代理 rollout，缺失与冲突记录显
   for (const [file, hash] of originalHashes) assert.equal(createHash("sha256").update(await readFile(file)).digest("hex"), hash);
 });
 
-test("SQLite 历史绑定窗口版本，WAL 中的新内容必须显式刷新才能加载", async (t) => {
+test("SQLite 追加及其他线程 WAL 写入不阻断旧快照翻页，新行仍须手动刷新", async (t) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'codex-manual-refresh-'));
   await mkdir(path.join(home, 'sessions'));
   await writeFile(path.join(home, 'sessions', 'synthetic.jsonl'), JSON.stringify({ type: 'session_meta', payload: { id: 'synthetic-thread' } }) + '\n');
   const file = path.join(home, 'thread_history_1.sqlite');
+  createDatabase(path.join(home, 'state_5.sqlite'), "CREATE TABLE threads(id TEXT, updated_at_ms INTEGER); INSERT INTO threads VALUES ('synthetic-thread', 1);");
   const writer = new DatabaseSync(file);
-  writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT); INSERT INTO thread_turns VALUES ('synthetic-thread', 'old');");
+  writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT, rollout_ordinal INTEGER);");
+  for (let i = 0; i < 53; i++) writer.prepare('INSERT INTO thread_turns VALUES (?, ?, ?)').run('synthetic-thread', `old-${i}`, i);
   const app = createAppServer({ home });
   await new Promise((resolve) => app.listen(0, '127.0.0.1', resolve));
   t.after(async () => { await new Promise((resolve) => app.close(resolve)); writer.close(); await rm(home, { recursive: true, force: true }); });
@@ -253,18 +255,30 @@ test("SQLite 历史绑定窗口版本，WAL 中的新内容必须显式刷新才
   const [session] = await (await fetch(`${base}/api/sessions`)).json();
   const endpoint = `${base}/api/sessions/${session.id}`;
   const initial = await (await fetch(`${endpoint}?view=window`)).json();
-  assert.match(initial.supplementRevision, /^[a-f0-9]{64}$/);
-  const historyUrl = `${endpoint}?view=history&historyPage=1&supplementRevision=${initial.supplementRevision}`;
+  assert.equal(typeof initial.supplementRevision, 'string');
+  const historyUrl = `${endpoint}?view=history&historyPage=2&supplementRevision=${encodeURIComponent(initial.supplementRevision)}`;
   assert.equal((await fetch(historyUrl)).status, 200);
-  writer.exec("INSERT INTO thread_turns VALUES ('synthetic-thread', 'new');");
+  writer.exec("INSERT INTO thread_turns VALUES ('other-thread', 'unrelated', 1); INSERT INTO thread_turns VALUES ('synthetic-thread', 'new', -1);");
+  createDatabase(path.join(home, 'state_5.sqlite'), "UPDATE threads SET updated_at_ms = 2;");
   const before = await readFile(file);
   const walBefore = await readFile(`${file}-wal`);
-  const rejected = await fetch(historyUrl);
-  assert.equal(rejected.status, 409);
-  assert.equal((await rejected.json()).code, 'stale_revision');
+  const oldPage = await fetch(historyUrl);
+  assert.equal(oldPage.status, 200);
+  const historyResponse = await oldPage.json();
+  assert.equal(historyResponse.historyOnly, true);
+  assert.deepEqual(historyResponse.supplement.map((source) => source.database), ['thread_history_1.sqlite']);
+  const turns = historyResponse.supplement[0].tables[0];
+  assert.deepEqual(turns.rows.map((row) => row.turn_id), ['old-50', 'old-51', 'old-52']);
+  assert.equal(turns.pagination.totalRows, 53);
   const refreshed = await (await fetch(`${endpoint}?view=window`)).json();
   assert.notEqual(refreshed.supplementRevision, initial.supplementRevision);
+  assert.equal(refreshed.supplement.find((source) => source.database === 'thread_history_1.sqlite').tables[0].rows[0].turn_id, 'new');
+  assert.equal(refreshed.supplement.find((source) => source.database === 'state_5.sqlite').tables[0].rows[0].updated_at_ms, 2);
   assert.equal((await fetch(`${endpoint}?view=history&supplementRevision=${refreshed.supplementRevision}`)).status, 200);
   assert.deepEqual(await readFile(file), before);
   assert.deepEqual(await readFile(`${file}-wal`), walBefore, 'viewer does not write the synthetic WAL');
+  writer.exec("UPDATE thread_turns SET turn_id = 'changed' WHERE turn_id = 'old-51';");
+  const rejected = await fetch(historyUrl);
+  assert.equal(rejected.status, 409);
+  assert.equal((await rejected.json()).code, 'stale_revision');
 });

@@ -58,6 +58,10 @@ test("SessionPanel 切换 JSONL / SQLite 保留两侧状态，history 翻页不�
       pagination: { page: 2, totalRows: 2, hasMore: false },
     }],
   }];
+  initialSupplement.push({
+    database: "state_5.sqlite", available: true,
+    tables: [{ table: "threads", rows: [{ title: "original SQLite metadata" }] }],
+  });
   const windowData = {
     id: "synthetic-session",
     sessionId: "thread-synthetic",
@@ -99,7 +103,7 @@ test("SessionPanel 切换 JSONL / SQLite 保留两侧状态，history 翻页不�
         return { ok: true, status: 200, json: async () => windowData };
       }
       if (view === "history") {
-        return { ok: true, status: 200, json: async () => { call.bodyRead = true; return { supplement: nextSupplement }; } };
+        return { ok: true, status: 200, json: async () => { call.bodyRead = true; return { supplement: nextSupplement, historyOnly: true }; } };
       }
       if (view === "search") return searchResponse.promise;
       if (view === "page") {
@@ -174,6 +178,8 @@ test("SessionPanel 切换 JSONL / SQLite 保留两侧状态，history 翻页不�
     assert.equal(historyCall.url.searchParams.get("historyPage"), "2");
     assert.equal(historyCall.url.searchParams.get("supplementRevision"), "sqlite-revision-synthetic");
     assert.match(sqliteTable().textContent, /second SQLite history page/);
+    await act(async () => [...host.querySelectorAll('details.sqlite-table')].at(-1).querySelector('summary').dispatchEvent(new window.MouseEvent('click', { bubbles: true })));
+    assert.match(host.textContent, /original SQLite metadata/, "history navigation retains the original non-history sources");
     await act(async () => sqliteTable().querySelector("details.sqlite-raw-row summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
     assert.equal(sqliteTable().querySelector("details.sqlite-raw-row").open, true, "SQLite raw JSON uses the native disclosure summary");
 

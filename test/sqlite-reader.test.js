@@ -2,15 +2,92 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { readSessionSupplement } from "../server-dist/sqlite-reader.js";
+import { readSessionSupplement, readSessionSupplementSnapshot, SupplementRevisionError } from "../server-dist/sqlite-reader.js";
 
 function createDatabase(file, sql) {
   const db = new DatabaseSync(file);
   try { db.exec(sql); } finally { db.close(); }
 }
+
+test("SQLite 快照按原始行边界分页，关联 items 不依赖当前 turns 页且不读入低 ordinal 新行", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "codex-sqlite-snapshot-relations-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const file = path.join(home, "thread_history_1.sqlite");
+  const writer = new DatabaseSync(file);
+  t.after(() => writer.close());
+  writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT, rollout_ordinal INTEGER); CREATE TABLE thread_items(turn_id TEXT, rollout_ordinal INTEGER, content TEXT);");
+  for (let i = 0; i < 53; i++) {
+    writer.prepare("INSERT INTO thread_turns VALUES ('target', ?, ?)").run(`turn-${i}`, i);
+    writer.prepare("INSERT INTO thread_items VALUES (?, ?, ?)").run(`turn-${i}`, i, `old-${i}`);
+  }
+  const initial = await readSessionSupplementSnapshot(home, { sessionId: "target" });
+  writer.exec("INSERT INTO thread_turns VALUES ('target', 'new-turn', -1), ('other', 'other-turn', 1); INSERT INTO thread_items VALUES ('turn-0', -1, 'new-low-ordinal'), ('new-turn', -2, 'new-turn-item'), ('other-turn', 0, 'unrelated');");
+  const before = await readFile(file);
+  const walBefore = await readFile(`${file}-wal`);
+  const old = await readSessionSupplementSnapshot(home, { sessionId: "target" }, { historyPage: 2, revision: initial.supplementRevision });
+  assert.equal(old.supplementRevision, initial.supplementRevision);
+  const tables = old.supplement[0].tables;
+  for (const table of tables) assert.deepEqual(table.pagination, { page: 2, pageSize: 50, totalRows: 53, hasMore: false });
+  assert.deepEqual(tables.find((table) => table.table === "thread_items").rows.map((row) => row.content), ["old-50", "old-51", "old-52"]);
+  const fresh = await readSessionSupplementSnapshot(home, { sessionId: "target" });
+  assert.equal(fresh.supplement[1].tables.find((table) => table.table === "thread_items").pagination.totalRows, 55);
+  assert.deepEqual(await readFile(file), before);
+  assert.deepEqual(await readFile(`${file}-wal`), walBefore);
+});
+
+test("SQLite 快照校验完整历史值、删除和 schema，拒绝伪造或跨会话版本", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "codex-sqlite-snapshot-validation-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const file = path.join(home, "thread_history_1.sqlite");
+  const writer = new DatabaseSync(file);
+  t.after(() => writer.close());
+  writer.exec("CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT); CREATE TABLE thread_items(thread_id TEXT, content TEXT); INSERT INTO thread_turns VALUES ('target', 'turn');");
+  writer.prepare("INSERT INTO thread_items VALUES ('target', ?)").run("x".repeat(13_000) + "a");
+  const capture = () => readSessionSupplementSnapshot(home, { sessionId: "target" });
+  const read = (revision, sessionId = "target") => readSessionSupplementSnapshot(home, { sessionId }, { historyPage: 2, revision });
+  const initial = await capture();
+  await assert.rejects(read(initial.supplementRevision + "x"), SupplementRevisionError);
+  await assert.rejects(read("x".repeat(8_193)), SupplementRevisionError);
+  await assert.rejects(read(initial.supplementRevision, "other"), SupplementRevisionError);
+  writer.prepare("UPDATE thread_items SET content = ?").run("x".repeat(13_000) + "b");
+  await assert.rejects(read(initial.supplementRevision), SupplementRevisionError, "hash the complete value beyond the display truncation");
+  const beforeDelete = await capture();
+  writer.exec("DELETE FROM thread_items;");
+  await assert.rejects(read(beforeDelete.supplementRevision), SupplementRevisionError);
+  const beforeSchema = await capture();
+  writer.exec("ALTER TABLE thread_turns ADD COLUMN extra TEXT;");
+  await assert.rejects(read(beforeSchema.supplementRevision), SupplementRevisionError);
+});
+
+test("SQLite 快照保留缺库/缺表状态，只有新窗口读取后来出现的来源", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "codex-sqlite-snapshot-missing-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const session = { sessionId: "target" };
+  const missing = await readSessionSupplementSnapshot(home, session);
+  createDatabase(path.join(home, "thread_history_1.sqlite"), "CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT); INSERT INTO thread_turns VALUES ('target', 'turn');");
+  const old = await readSessionSupplementSnapshot(home, session, { revision: missing.supplementRevision });
+  assert.equal(old.supplement[0].available, false);
+  const beforeTable = await readSessionSupplementSnapshot(home, session);
+  createDatabase(path.join(home, "thread_history_1.sqlite"), "CREATE TABLE thread_items(thread_id TEXT, content TEXT); INSERT INTO thread_items VALUES ('target', 'new');");
+  const oldTable = await readSessionSupplementSnapshot(home, session, { revision: beforeTable.supplementRevision });
+  assert.equal(oldTable.supplement[0].tables.find((table) => table.table === "thread_items").available, false);
+  assert.equal((await readSessionSupplementSnapshot(home, session)).supplement[1].tables.find((table) => table.table === "thread_items").rows[0].content, "new");
+});
+
+test("SQLite 数据库替换后即使内容相同也拒绝旧快照", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "codex-sqlite-snapshot-replaced-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const file = path.join(home, "thread_history_1.sqlite");
+  createDatabase(file, "CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT); INSERT INTO thread_turns VALUES ('target', 'turn');");
+  const initial = await readSessionSupplementSnapshot(home, { sessionId: "target" });
+  const replacement = path.join(home, "replacement.sqlite");
+  await writeFile(replacement, await readFile(file));
+  await rename(replacement, file);
+  await assert.rejects(readSessionSupplementSnapshot(home, { sessionId: "target" }, { revision: initial.supplementRevision }), SupplementRevisionError);
+});
 
 test("只读关联支持三种 schema，容错缺表并忽略其他数据库", async (t) => {
   const home = await mkdtemp(path.join(os.tmpdir(), "codex-sqlite-"));
