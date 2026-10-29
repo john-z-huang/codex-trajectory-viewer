@@ -53,8 +53,9 @@ test("两来源按各自类型筛选，保持独立选择、物理分页、稳�
         key: id,
         detail: {
           id, title: `Synthetic ${id}`, filename: "synthetic.jsonl",
-          supplement: [{ database: "synthetic.sqlite", available: true, tables: [
+          supplement: [{ database: "state_5.sqlite", available: true, tables: [
             { table: "threads", rows: [{ thread_id: id, title: "metadata remains accessible" }] },
+          ] }, { database: "thread_history_1.sqlite", available: true, tables: [
             { table: "thread_items", rows: page === 1 ? rows : [rows[0]], pagination: { page, pageSize: 9, totalRows: 10, hasMore: page === 1 } },
           ] }],
         },
@@ -86,7 +87,7 @@ test("两来源按各自类型筛选，保持独立选择、物理分页、稳�
     await click(filterInput(jsonl(), "工具调用"));
     assert.deepEqual(cards().map((card) => Number(card.dataset.lineNumber)), [1, 3, 4, 5, 6, 7, 8, 9, 10]);
     assert.ok([...jsonl().querySelectorAll(".conversation-type-filter label")].filter((node) => node.textContent === "工具调用").every((node) => !node.querySelector("input").checked), "top and bottom parent filters stay synchronized");
-    assert.equal(sourceGroups()[1].querySelectorAll(".event-card").length, 10, "another session keeps its own filter");
+    assert.equal(sourceGroups()[1].querySelector(".session-source-panel").querySelectorAll(".event-card").length, 10, "another session keeps its own filter");
     cards()[0].focus();
     await act(async () => cards()[0].dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
     assert.equal(window.document.activeElement.dataset.lineNumber, "3", "keyboard navigation skips hidden records");
@@ -102,18 +103,17 @@ test("两来源按各自类型筛选，保持独立选择、物理分页、稳�
     assert.match(jsonl().textContent, /第 2 行已被类型筛选隐藏/);
 
     await click(sourceGroups()[0].querySelectorAll('[role="tab"]')[1]);
-    const itemTable = () => sqlite().querySelectorAll("details.sqlite-table")[1];
-    await click(itemTable().querySelector("summary"));
-    assert.equal(itemTable().querySelectorAll(".sqlite-history-card").length, 9, "JSONL choices do not alter SQLite");
+    const itemTable = () => sqlite().querySelector(".sqlite-conversation");
+    assert.equal(itemTable().querySelectorAll(".event-card").length, 9, "JSONL choices do not alter SQLite");
     assert.ok(filterInput(sqlite(), "助手思考"), "SQLite exposes reasoning separately");
     assert.ok(filterInput(sqlite(), "文件变更"), "SQLite exposes file changes separately");
     assert.equal(filterInput(sqlite(), "事件"), undefined);
     await click(filterInput(sqlite(), "用户消息"));
     await click(filterInput(sqlite(), "命令执行"));
-    assert.deepEqual([...itemTable().querySelectorAll(".sqlite-history-card")].map((card) => Number(card.dataset.sqliteIndex)), [1, 2, 4, 5, 6, 7, 8]);
-    const firstVisible = itemTable().querySelector(".sqlite-history-card");
+    assert.deepEqual([...itemTable().querySelectorAll(".event-card")].map((card) => Number(card.dataset.lineNumber) - 1), [1, 2, 4, 5, 6, 7, 8]);
+    const firstVisible = itemTable().querySelector(".event-card");
     await click(firstVisible.querySelector('[aria-label="回到会话开始处"]'));
-    assert.equal(window.document.activeElement, firstVisible, "SQLite first action uses the first visible original index");
+    assert.match(itemTable().textContent, /第 1 条已被类型筛选隐藏/, "SQLite follows the same hidden-boundary behavior as JSONL");
 
     await click(sourceGroups()[0].querySelectorAll('[role="tab"]')[0]);
     assert.equal(filterInput(jsonl(), "工具调用").checked, false, "JSONL selection survives source switch");
@@ -129,18 +129,20 @@ test("两来源按各自类型筛选，保持独立选择、物理分页、稳�
     assert.match(jsonl().querySelector(".timeline-heading span").textContent, /11 行 · 第 2 \/ 2 页/);
 
     await click(sourceGroups()[0].querySelectorAll('[role="tab"]')[1]);
-    assert.equal(itemTable().querySelectorAll(".sqlite-history-card").length, 0);
+    assert.equal(itemTable().querySelectorAll(".event-card").length, 0);
     assert.match(itemTable().textContent, /本页显示 0 \/ 1 条/);
-    const previousHistory = [...itemTable().querySelectorAll(".history-pager button")].find((button) => button.textContent === "上一页");
+    const previousHistory = itemTable().querySelector('[aria-label="上一页"]');
     await click(previousHistory);
     assert.deepEqual(historyPages, [1], "SQLite pagination remains available on a filtered empty page");
     await click(filterButton(sqlite(), "显示全部"));
-    assert.equal(itemTable().querySelectorAll(".sqlite-history-card").length, 1);
+    assert.equal(itemTable().querySelectorAll(".event-card").length, 1);
     await click(filterButton(sqlite(), "隐藏全部"));
-    assert.equal(itemTable().querySelectorAll(".sqlite-history-card").length, 0);
-    const metadataTable = sqlite().querySelector("details.sqlite-table");
-    await click(metadataTable.querySelector("summary"));
-    assert.equal(metadataTable.querySelectorAll(".sqlite-history-card").length, 1, "metadata stays accessible with all conversation types hidden");
+    assert.equal(itemTable().querySelectorAll(".event-card").length, 0);
+    const metadataTable = sqlite().querySelector(".sqlite-session-info-table");
+    assert.equal(metadataTable.querySelectorAll(".sqlite-session-info-row").length, 1, "metadata stays visible with all conversation types hidden");
+    assert.match(metadataTable.textContent, /metadata remains accessible/);
+    assert.equal(metadataTable.querySelector("button, input"), null);
+    assert.equal(metadataTable.querySelector("details.sqlite-session-info-raw summary").textContent, "原始 JSON");
 
     await click(sourceGroups()[0].querySelectorAll('[role="tab"]')[0]);
     await click(filterButton(jsonl(), "显示全部"));
@@ -207,11 +209,11 @@ test("两来源按各自类型筛选，保持独立选择、物理分页、稳�
     await click(filterInput(sqlite(), "MCP 工具调用"));
     assert.equal(filterInput(sqlite(), "工具调用").indeterminate, true);
     assert.equal(filterInput(sqlite(), "工具活动").indeterminate, true);
-    assert.equal(itemTable().querySelector('[data-sqlite-index="5"]'), null);
-    assert.ok(itemTable().querySelector('[data-sqlite-index="6"]'), "dynamic tool calls stay visible");
+    assert.equal(itemTable().querySelector('[data-line-number="6"]'), null);
+    assert.ok(itemTable().querySelector('[data-line-number="7"]'), "dynamic tool calls stay visible");
     await click(filterInput(sqlite(), "工具活动"));
     await click(filterInput(sqlite(), "工具活动"));
-    assert.deepEqual([...itemTable().querySelectorAll(".sqlite-history-card")].map((card) => Number(card.dataset.sqliteIndex)), [0, 1, 2, 8]);
+    assert.deepEqual([...itemTable().querySelectorAll(".event-card")].map((card) => Number(card.dataset.lineNumber) - 1), [0, 1, 2, 8]);
   } finally {
     if (root) await act(async () => root.unmount());
     if (vite) await vite.close();

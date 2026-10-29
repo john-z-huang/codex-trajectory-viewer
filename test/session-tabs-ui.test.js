@@ -284,8 +284,8 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
     assert.equal(rootElement.querySelectorAll('.session-tabs [role="tab"]').length, 1);
     assert.ok(rootElement.querySelectorAll(".session-list .session-item").length <= 100);
     assert.ok(rootElement.querySelectorAll(".session-list .session-item").length > 0);
-    assert.ok(firstPanel.querySelectorAll(".event-card").length <= 100);
-    assert.ok(firstPanel.querySelectorAll(".event-card").length > 0);
+    assert.ok(firstPanel.querySelector(".session-source-panel").querySelectorAll(".event-card").length <= 100);
+    assert.ok(firstPanel.querySelector(".session-source-panel").querySelectorAll(".event-card").length > 0);
     const firstEvent = firstPanel.querySelector(".event-card");
     const timelineObserver = TestIntersectionObserver.instances.at(-1);
     assert.ok(timelineObserver);
@@ -294,17 +294,11 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
     assert.ok(collapseFirstEvent);
     await act(async () => collapseFirstEvent.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
     assert.ok(firstEvent.querySelector(".event-body").classList.contains("collapsed"));
-    const historyTable = firstPanel.querySelector(".sqlite-table");
-    await act(async () => historyTable.querySelector("summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
-    const nextHistoryPage = firstPanel.querySelector(".history-pager button:last-child");
-    assert.ok(nextHistoryPage);
-    await act(async () => {
-      nextHistoryPage.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
     assert.equal(firstPanel.querySelector(".event-card"), firstEvent);
     assert.equal(TestIntersectionObserver.instances.at(-1), timelineObserver);
-    assert.equal(timelineObserver.disconnectCount, 0, "supplement-only paging keeps the timeline observer connected");
+    assert.equal(timelineObserver.disconnectCount, 0, "collapsing keeps the timeline observer connected");
+    // 收起触发的平滑滚动完成后再模拟用户的新滚动，避免旧动画覆盖测试位置。
+    await act(async () => new Promise((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve))));
     firstPanel.scrollTop = 420;
     const sidebar = rootElement.querySelector(".session-list");
     sidebar.scrollTop = 180;
@@ -320,8 +314,8 @@ test("sidebar selection opens a new mounted tab and restores each tab's reading 
     assert.equal(panels.length, 2);
     assert.equal(panels[0].hidden, true);
     assert.equal(panels[0].scrollTop, 420);
-    assert.ok(panels[1].querySelectorAll(".event-card").length <= 100);
-    assert.ok(panels[1].querySelectorAll(".event-card").length > 0);
+    assert.ok(panels[1].querySelector(".session-source-panel").querySelectorAll(".event-card").length <= 100);
+    assert.ok(panels[1].querySelector(".session-source-panel").querySelectorAll(".event-card").length > 0);
     assert.equal(panels[1].hidden, false);
     assert.equal(sidebar.scrollTop, 180);
 

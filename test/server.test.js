@@ -12,6 +12,65 @@ function createDatabase(file, sql) {
   try { db.exec(sql); } finally { db.close(); }
 }
 
+test("SQLite 超长对话经窗口、历史与详情 API 完整传输，服务端不截断字段", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "codex-sqlite-full-content-api-"));
+  await mkdir(path.join(home, "sessions"));
+  const rolloutPath = path.join(home, "sessions", "synthetic.jsonl");
+  await writeFile(rolloutPath, JSON.stringify({ type: "session_meta", payload: { id: "synthetic-thread" } }) + "\n");
+  const text = `${"x".repeat(1_048_576)}\n完整对话末尾😀`;
+  const extraText = `${"元数据".repeat(6_000)}字段末尾`;
+  const itemJson = JSON.stringify({ type: "agentMessage", text });
+  const databasePath = path.join(home, "thread_history_1.sqlite");
+  const writer = new DatabaseSync(databasePath);
+  try {
+    writer.exec("CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT, summary TEXT); CREATE TABLE thread_items(thread_id TEXT, turn_id TEXT, item_json TEXT, content TEXT, binary_value BLOB);");
+    writer.prepare("INSERT INTO thread_turns VALUES (?, ?, ?)").run("synthetic-thread", "turn-1", extraText);
+    writer.prepare("INSERT INTO thread_items VALUES (?, ?, ?, ?, ?)").run("synthetic-thread", "turn-1", itemJson, extraText, new Uint8Array([0, 1, 255]));
+  } finally { writer.close(); }
+  const files = [rolloutPath, databasePath];
+  const hashes = () => Promise.all(files.map(async (file) => createHash("sha256").update(await readFile(file)).digest("hex")));
+  const before = await hashes();
+  const app = createAppServer({ home });
+  await new Promise((resolve) => app.listen(0, "127.0.0.1", resolve));
+  t.after(async () => { await new Promise((resolve) => app.close(resolve)); await rm(home, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${app.address().port}`;
+  const [session] = await (await fetch(`${base}/api/sessions`)).json();
+  const endpoint = `${base}/api/sessions/${session.id}`;
+  async function checkResponse(query) {
+    const response = await fetch(endpoint + query);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    const history = body.supplement.find((source) => source.database === "thread_history_1.sqlite");
+    assert.equal(history.available, true);
+    const item = history.tables.find((table) => table.table === "thread_items").rows[0];
+    assert.equal(item.item_json, itemJson, "the entire serialized payload reaches the HTTP client");
+    assert.equal(JSON.parse(item.item_json).text, text, "the full payload remains valid JSON including its final characters");
+    assert.equal(item.content, extraText, "unrecognized long fields are also preserved");
+    assert.deepEqual(item.binary_value, [0, 1, 255]);
+    assert.equal(history.tables.find((table) => table.table === "thread_turns").rows[0].summary, extraText);
+    return body.supplementRevision;
+  }
+  const revision = await checkResponse("?view=window");
+  const searchParams = new URLSearchParams({ view: "history-search", supplementRevision: revision, q: "完整对话末尾😀", afterIndex: "0" });
+  const searchResponse = await fetch(`${endpoint}?${searchParams}`);
+  assert.equal(searchResponse.status, 200);
+  assert.deepEqual(await searchResponse.json(), { rowIndex: 1, page: 1, totalRows: 1 });
+  for (const changes of [{ q: "" }, { q: "x".repeat(257) }, { afterIndex: "-1" }, { supplementRevision: "" }]) {
+    const invalid = new URLSearchParams(searchParams);
+    for (const [key, value] of Object.entries(changes)) invalid.set(key, value);
+    assert.equal((await fetch(`${endpoint}?${invalid}`)).status, 400);
+  }
+  const staleSearch = new URLSearchParams(searchParams);
+  staleSearch.set("supplementRevision", "forged");
+  assert.equal((await fetch(`${endpoint}?${staleSearch}`)).status, 409);
+  const highPage = await (await fetch(`${endpoint}?view=history&historyPage=10001&supplementRevision=${encodeURIComponent(revision)}`)).json();
+  assert.equal(highPage.supplement[0].tables.find((table) => table.table === "thread_items").pagination.page, 10001, "all search result pages remain addressable");
+  await checkResponse(`?view=history&supplementRevision=${encodeURIComponent(revision)}`);
+  await checkResponse("?view=history");
+  await checkResponse("");
+  assert.deepEqual(await hashes(), before);
+});
+
 test("会话列表 API 将 Guardian 标记为独立类型且不关联父会话目录", async (t) => {
   const home = await mkdtemp(path.join(os.tmpdir(), "codex-viewer-guardian-"));
   const sessionRoot = path.join(home, "sessions", "2026", "10", "15");

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { RolloutReaderError, type RolloutReaderStore } from "./rollout-reader.js";
-import { readSessionSupplement, readSessionSupplementSnapshot, readThreadSummaries, SupplementRevisionError } from "./sqlite-reader.js";
+import { readSessionSupplement, readSessionSupplementSnapshot, readThreadSummaries, searchSessionHistory, SupplementRevisionError } from "./sqlite-reader.js";
 import { linkSubagents, subagentActivityFromRollout } from "./subagents.js";
 import { discoverSessions, mergeThreadSummary } from "./session-discovery.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -206,9 +206,22 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
 
   const requestedHistoryPage = Number(url.searchParams.get("historyPage") ?? 1);
   const historyPage = Number.isSafeInteger(requestedHistoryPage) && requestedHistoryPage > 0
-    ? Math.min(requestedHistoryPage, 10_000)
+    ? requestedHistoryPage
     : 1;
   const view = url.searchParams.get("view");
+  if (view === "history-search") {
+    const query = url.searchParams.get("q");
+    const revision = url.searchParams.get("supplementRevision");
+    const afterIndex = queryInteger(url, "afterIndex", 0, 0);
+    if (!query || query.length > 256 || !revision || afterIndex === null) {
+      sendJson(response, 400, { error: "q (1–256 UTF-16 code units), supplementRevision and a non-negative afterIndex are required", code: "invalid_history_search" });
+      return true;
+    }
+    try {
+      sendJson(response, 200, await searchSessionHistory(sqliteHome, match, revision, query, afterIndex));
+    } catch (error) { sendReadError(response, error); }
+    return true;
+  }
   if (view === "history") {
     try {
       const revision = url.searchParams.get("supplementRevision");

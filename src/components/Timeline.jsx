@@ -59,7 +59,9 @@ function TimelineToolbar({
   onFindSubmit,
   onNavigateLine,
   filterProps,
+  source = "jsonl",
 }) {
+  const sqlite = source === "sqlite";
   const toolbarId = useId();
   const ordinalInputId = `timeline-ordinal-${toolbarId}`;
   const findInputId = `timeline-find-${toolbarId}`;
@@ -67,8 +69,8 @@ function TimelineToolbar({
   return (
     <div className="timeline-label timeline-toolbar">
       <div className="timeline-heading">
-        <h2>运行记录</h2>
-        <span>按 JSONL 物理行顺序 · {totalLines} 行 · 第 {currentPage} / {totalPages} 页</span>
+        <h2>{sqlite ? "历史对话" : "运行记录"}</h2>
+        <span>{sqlite ? "按 SQLite 记录顺序" : "按 JSONL 物理行顺序"} · {totalLines} {sqlite ? "条" : "行"} · 第 {currentPage} / {totalPages} 页</span>
       </div>
       <div className="timeline-navigation" aria-label="时间线导航">
         <button type="button" onClick={() => onNavigateLine(1, "start")} disabled={!totalLines || pageLoading} aria-label="回到会话开始处">↑ 开始</button>
@@ -76,12 +78,12 @@ function TimelineToolbar({
         <button type="button" onClick={() => onNavigateLine(Math.min(totalLines, startLine + pageSize), "start")} disabled={!totalLines || pageLoading || currentPage >= totalPages} aria-label="下一页">下一页</button>
         <button type="button" onClick={() => onNavigateLine(totalLines, "end")} disabled={!totalLines || pageLoading} aria-label="跳转到会话末尾">↓ 末尾</button>
         <form className="timeline-jump" onSubmit={onJumpSubmit}>
-          <label htmlFor={ordinalInputId}>原始行号</label>
-          <input id={ordinalInputId} type="number" min="1" max={totalLines} value={jumpValue} onChange={(event) => onJumpValueChange(event.target.value)} aria-label="跳转到原始行号" />
+          <label htmlFor={ordinalInputId}>{sqlite ? "记录序号" : "原始行号"}</label>
+          <input id={ordinalInputId} type="number" min="1" max={totalLines} value={jumpValue} onChange={(event) => onJumpValueChange(event.target.value)} aria-label={sqlite ? "跳转到记录序号" : "跳转到原始行号"} />
           <button type="submit" disabled={!totalLines || pageLoading}>跳转</button>
         </form>
         <form className="timeline-find" onSubmit={onFindSubmit}>
-          <label htmlFor={findInputId}>查找轨迹内容（区分大小写，最多256字符）</label>
+          <label htmlFor={findInputId}>{sqlite ? "查找历史对话" : "查找轨迹内容"}（区分大小写，最多256字符）</label>
           <input id={findInputId} type="search" maxLength="256" value={findQuery} onChange={onFindQueryChange} placeholder="原文文本（区分大小写）" />
           <button type="submit" disabled={!totalLines || pageLoading || searchLoading}>{searchLoading ? "查找中…" : "查找下一个"}</button>
         </form>
@@ -103,9 +105,12 @@ export function Timeline({
   onNavigateLine,
   onSearch,
   onRevisionStale,
+  source = "jsonl",
+  recordTypes = JSONL_RECORD_TYPES,
 }) {
+  const unit = source === "sqlite" ? "条" : "行";
   const [hiddenTypes, setHiddenTypes] = useState(() => new Set());
-  const entries = useMemo(() => pageEntries.filter((entry) => !hiddenTypes.has(recordFilterType(entry.filterType ?? entry.kind, JSONL_RECORD_TYPES))), [pageEntries, hiddenTypes]);
+  const entries = useMemo(() => pageEntries.filter((entry) => !hiddenTypes.has(recordFilterType(entry.filterType ?? entry.kind, recordTypes))), [pageEntries, hiddenTypes, recordTypes]);
   const entryKeys = useMemo(() => entries.map(entryKey), [entries]);
   const revision = rollout?.revision ?? pageEntries[0]?.originalLocator?.revision ?? "";
   const totalLines = Number.isSafeInteger(rollout?.totalLines) ? rollout.totalLines : pageEntries.length;
@@ -122,6 +127,8 @@ export function Timeline({
   const pendingNavigationRef = useRef(null);
   const pendingCenterEntryId = useRef(null);
   const findCursorRef = useRef(-1);
+  const lastFindQueryRef = useRef("");
+  const findRequestRef = useRef(0);
   const [readingRevision, setReadingRevision] = useState(0);
   const [visibleEntryIds, setVisibleEntryIds] = useState(() => new Set());
   const [findQuery, setFindQuery] = useState("");
@@ -147,6 +154,9 @@ export function Timeline({
 
   useEffect(() => {
     if (readingScopeRef.current !== revision) {
+      findRequestRef.current += 1;
+      findCursorRef.current = -1;
+      setFindStatus("");
       for (const [lineNumber, state] of readingStateRef.current) {
         if (lineNumber > totalLines) {
           readingStateRef.current.delete(lineNumber);
@@ -171,6 +181,8 @@ export function Timeline({
       return next.size === current.size ? current : next;
     });
   }, [entryKeys, revision]);
+
+  useEffect(() => () => { findRequestRef.current += 1; }, []);
 
   useEffect(() => {
     const timeline = timelineRef.current;
@@ -228,7 +240,7 @@ export function Timeline({
       } else if (pageEntries.some((entry) => entry.lineNumber === pendingNavigation.lineNumber)) {
         pendingNavigationRef.current = null;
         pendingFocusRef.current = null;
-        setFindStatus(`第 ${pendingNavigation.lineNumber} 行已被类型筛选隐藏，请调整显示类型。`);
+        setFindStatus(`第 ${pendingNavigation.lineNumber} ${unit}已被类型筛选隐藏，请调整显示类型。`);
       } else if (!pendingNavigation.pageRequested && onNavigateLine) {
         pendingNavigationRef.current = { ...pendingNavigation, pageRequested: true };
         void onNavigateLine(pendingNavigation.lineNumber);
@@ -253,7 +265,7 @@ export function Timeline({
       top: Math.max(0, Math.min(targetTop, maxScrollTop)),
       behavior: "smooth",
     });
-  }, [active, entries, pageEntries, onNavigateLine, readingRevision, virtualWindow.scrollToIndex]);
+  }, [active, entries, pageEntries, onNavigateLine, readingRevision, virtualWindow.scrollToIndex, unit]);
 
   useLayoutEffect(() => {
     if (!active) return;
@@ -337,7 +349,7 @@ export function Timeline({
     if (index < 0 && pageEntries.some((entry) => entry.lineNumber === lineNumber)) {
       pendingNavigationRef.current = null;
       pendingFocusRef.current = null;
-      setFindStatus(`第 ${lineNumber} 行已被类型筛选隐藏，请调整显示类型。`);
+      setFindStatus(`第 ${lineNumber} ${unit}已被类型筛选隐藏，请调整显示类型。`);
       return;
     }
     if (!activeRef.current) {
@@ -355,7 +367,7 @@ export function Timeline({
     }
     pendingNavigationRef.current = { lineNumber, align, moveFocus, pageRequested: true };
     if (onNavigateLine) void onNavigateLine(lineNumber);
-  }, [active, entries, pageEntries, onNavigateLine, totalLines, virtualWindow.scrollToIndex]);
+  }, [active, entries, pageEntries, onNavigateLine, totalLines, virtualWindow.scrollToIndex, unit]);
 
   const scrollToEntry = useCallback((event, edge) => {
     const lineNumber = edge === "first" ? 1 : totalLines;
@@ -367,6 +379,10 @@ export function Timeline({
     const submittedQuery = event?.currentTarget?.querySelector("input")?.value ?? findQuery;
     setFindQuery(submittedQuery);
     const query = submittedQuery;
+    if (lastFindQueryRef.current !== query) {
+      lastFindQueryRef.current = query;
+      findCursorRef.current = -1;
+    }
     if (!query) {
       setFindStatus("请输入要查找的文本");
       return;
@@ -375,14 +391,16 @@ export function Timeline({
       setFindStatus("查找文本最多 256 个 UTF-16 代码单元");
       return;
     }
-    const afterLine = currentLine > 0 ? currentLine : 0;
+    const request = ++findRequestRef.current;
+    const afterLine = findCursorRef.current >= 0 ? findCursorRef.current : currentLine > 0 ? currentLine : 0;
     const lineNumber = onSearch
       ? await onSearch(query, afterLine)
       : entries.find((entry) => hasEntryText(entry, query))?.lineNumber ?? null;
-    if (lineNumber === undefined) return;
+    if (request !== findRequestRef.current || lineNumber === undefined) return;
     if (lineNumber == null) setFindStatus("未找到匹配记录（区分大小写）");
     else {
-      setFindStatus(`第 ${lineNumber} / ${totalLines} 行（区分大小写）`);
+      findCursorRef.current = lineNumber;
+      setFindStatus(`第 ${lineNumber} / ${totalLines} ${unit}（区分大小写）`);
       navigateLine(lineNumber, "center");
     }
   }
@@ -393,10 +411,10 @@ export function Timeline({
     setJumpValue(submittedOrdinal);
     const lineNumber = Number(submittedOrdinal);
     if (!Number.isInteger(lineNumber) || lineNumber < 1 || lineNumber > totalLines) {
-      setFindStatus(`请输入 1 到 ${totalLines} 之间的原始行号`);
+      setFindStatus(`请输入 1 到 ${totalLines} 之间的${source === "sqlite" ? "记录序号" : "原始行号"}`);
       return;
     }
-    setFindStatus(`第 ${lineNumber} / ${totalLines} 行`);
+    setFindStatus(`第 ${lineNumber} / ${totalLines} ${unit}`);
     navigateLine(lineNumber, "start");
   }
 
@@ -427,6 +445,7 @@ export function Timeline({
   const layout = virtualWindow.layout;
   const toolbarProps = {
     totalLines,
+    source,
     currentPage,
     totalPages,
     pageSize,
@@ -440,31 +459,32 @@ export function Timeline({
       setFindQuery(event.target.value);
       setFindStatus("");
       findCursorRef.current = -1;
+      findRequestRef.current += 1;
     },
     findStatus,
     onJumpSubmit: jumpToOrdinal,
     onFindSubmit: findNext,
     onNavigateLine: navigateLine,
     filterProps: {
-      options: JSONL_RECORD_TYPES,
+      options: recordTypes,
       hiddenTypes,
       onChange: setHiddenTypes,
       visibleCount: entries.length,
       totalCount: pageEntries.length,
-      note: "筛选应用于每页展示；行号、分页和原文查找仍按全部记录。",
+      note: `筛选应用于每页展示；${source === "sqlite" ? "序号" : "行号"}、分页和原文查找仍按全部记录。`,
     },
   };
 
   return (
     <>
       <TimelineToolbar {...toolbarProps} />
-      {pageLoading && <p className="timeline-load-status" role="status">正在读取第 {currentLine || 1} 行所在页…</p>}
+      {pageLoading && <p className="timeline-load-status" role="status">正在读取第 {currentLine || 1} {unit}所在页…</p>}
       {!pageLoading && pageEntries.length > 0 && !entries.length && <p className="source-note" role="status">当前页的记录已全部隐藏，请调整显示类型或继续翻页。</p>}
       <div
         className="timeline virtual-timeline"
         ref={setTimelineRef}
         role="list"
-        aria-label="运行记录时间线"
+        aria-label={source === "sqlite" ? "SQLite 历史对话时间线" : "运行记录时间线"}
         aria-setsize={totalLines}
         tabIndex={-1}
         onKeyDown={onTimelineKeyDown}

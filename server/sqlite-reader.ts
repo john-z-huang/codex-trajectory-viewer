@@ -11,6 +11,8 @@ const DATABASES = [
  ] as const;
 const THREAD_KEYS: readonly string[] = ["thread_id", "threadId", "thread_id_str", "thread_uuid"];
 const ID_KEYS: readonly string[] = ["id", "thread_id", "threadId", "thread_id_str", "thread_uuid"];
+const HISTORY_PAGE_SIZE = 50;
+const MAX_HISTORY_PAGE = Math.floor(Number.MAX_SAFE_INTEGER / HISTORY_PAGE_SIZE);
 
 interface TableSnapshot {
   maxRowid: string;
@@ -50,7 +52,7 @@ function decodeSnapshot(revision: string, home: string, ids: string[]): Database
 function jsonSafe(row: Record<string, SQLOutputValue>): JsonRecord {
   return Object.fromEntries(Object.entries(row).map(([key, value]) => [
     key,
-    typeof value === "bigint" ? value.toString() : value instanceof Uint8Array ? `[binary data: ${value.byteLength} bytes]` : typeof value === "string" && value.length > 12_000 ? `${value.slice(0, 12_000)}… [truncated]` : value,
+    typeof value === "bigint" ? value.toString() : value instanceof Uint8Array ? Array.from(value) : value,
   ]));
 }
 
@@ -70,11 +72,16 @@ interface DatabaseReadResult {
   available: boolean;
   tables: DatabaseTableResult[];
   error?: string;
+  search?: HistorySearchResult;
 }
+
+interface HistorySearchQuery { query: string; afterIndex: number }
+interface HistorySearchResult { rowIndex: number | null; page: number | null; totalRows: number }
 
 function readDatabase(
   dbPath: string, tableNames: readonly string[], wantedIds: string[], historyPage = 1,
   snapshot?: { state: DatabaseSnapshot; expected: boolean },
+  search?: HistorySearchQuery,
 ): DatabaseReadResult {
   let database: DatabaseSync | undefined;
   try {
@@ -84,6 +91,7 @@ function readDatabase(
     database.exec("BEGIN DEFERRED");
     const existingTables = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => String(row.name)));
     const tables = [];
+    let searchResult: HistorySearchResult | undefined;
     const turnIds = new Set<string>();
     let turnRelation: { id: string; thread: string; rowid: string; maxRowid: string } | undefined;
     for (const table of tableNames) {
@@ -127,7 +135,7 @@ function readDatabase(
         continue;
       }
       const paginated = table === "thread_turns" || table === "thread_items";
-      const pageSize = paginated ? 50 : 500;
+      const pageSize = HISTORY_PAGE_SIZE;
       const page = paginated ? historyPage : 1;
       const rowid = ["rowid", "_rowid_", "oid"].find((name) => !columns.includes(name));
       if (snapshot) {
@@ -159,12 +167,36 @@ function readDatabase(
         : 0;
       const orderColumn = columns.includes("rollout_ordinal") ? "rollout_ordinal" : "rowid";
       const order = snapshot && rowid ? `${quoteIdentifier(orderColumn)}, ${quoteIdentifier(rowid)}` : quoteIdentifier(orderColumn);
-      const rows = database.prepare(`SELECT * FROM ${quoteIdentifier(table)} WHERE ${clauses.join(" OR ")} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...values, pageSize, (page - 1) * pageSize);
+      const query = `SELECT * FROM ${quoteIdentifier(table)} WHERE ${clauses.join(" OR ")} ORDER BY ${order}`;
+      if (search) {
+        if (table === "thread_items") {
+          let first: number | null = null;
+          let next: number | null = null;
+          let index = 0;
+          const statement = database.prepare(query);
+          statement.setReadBigInts(true);
+          for (const row of statement.iterate(...values)) {
+            index += 1;
+            const matches = JSON.stringify(jsonSafe(row)).includes(search.query)
+              || Object.values(row).some((value) => typeof value === "string" && value.includes(search.query));
+            if (!matches) continue;
+            first ??= index;
+            if (index > search.afterIndex) { next = index; break; }
+          }
+          const rowIndex = next ?? first;
+          searchResult = { rowIndex, page: rowIndex === null ? null : Math.ceil(rowIndex / pageSize), totalRows };
+        }
+        tables.push({ table, available: true, rows: [] });
+        continue;
+      }
+      const rows = paginated
+        ? database.prepare(`${query} LIMIT ? OFFSET ?`).all(...values, pageSize, (page - 1) * pageSize)
+        : database.prepare(query).all(...values);
       if (table === "thread_turns" && idColumn) for (const row of rows) if (row[idColumn] != null) turnIds.add(String(row[idColumn]));
       tables.push({ table, available: true, rows: rows.map(jsonSafe), ...(paginated ? { pagination: { page, pageSize, totalRows, hasMore: page * pageSize < totalRows } } : {}) });
     }
     database.exec("COMMIT");
-    return { available: true, tables };
+    return { available: true, tables, ...(searchResult ? { search: searchResult } : {}) };
   } catch (error: unknown) {
     if (snapshot?.expected) throw new SupplementRevisionError();
     return { available: false, tables: [], error: errorMessage(error) };
@@ -176,9 +208,9 @@ function readDatabase(
 export async function readSessionSupplementSnapshot(
   sqliteHome: string,
   session: Pick<Session, "sessionId"> & { threadId?: string },
-  { historyPage = 1, revision }: { historyPage?: number; revision?: string } = {},
+  { historyPage = 1, revision, historySearch }: { historyPage?: number; revision?: string; historySearch?: HistorySearchQuery } = {},
 ): Promise<{ supplement: Array<{ database: string } & DatabaseReadResult>; supplementRevision: string }> {
-  const page = Number.isSafeInteger(historyPage) ? Math.min(10_000, Math.max(1, historyPage)) : 1;
+  const page = Number.isSafeInteger(historyPage) ? Math.min(MAX_HISTORY_PAGE, Math.max(1, historyPage)) : 1;
   const home = await realpath(sqliteHome).catch(() => path.resolve(sqliteHome));
   const ids = [...new Set([session.sessionId, session.threadId].filter((value): value is string => typeof value === "string" && value.length > 0))];
   const snapshots = revision === undefined ? DATABASES.map((): DatabaseSnapshot => ({ tables: {} })) : decodeSnapshot(revision, home, ids);
@@ -198,7 +230,7 @@ export async function readSessionSupplementSnapshot(
       const identity = createHash("sha256").update(`${info.dev}:${info.ino}`).digest("hex");
       if (revision !== undefined && snapshot.identity !== identity) throw new SupplementRevisionError();
       snapshot.identity = identity;
-      const result = readDatabase(resolved, tables, ids, page, filename === "thread_history_1.sqlite" ? { state: snapshot, expected: revision !== undefined } : undefined);
+      const result = readDatabase(resolved, tables, ids, page, filename === "thread_history_1.sqlite" ? { state: snapshot, expected: revision !== undefined } : undefined, filename === "thread_history_1.sqlite" ? historySearch : undefined);
       const after = await stat(resolved, { bigint: true });
       if (info.dev !== after.dev || info.ino !== after.ino) throw new SupplementRevisionError();
       if (!result.available) snapshot.error = result.error ?? "database unavailable";
@@ -226,6 +258,27 @@ function resolveDatabasePath(home: string, filename: string): Promise<string> {
 }
 
 /** Index threads metadata for summaries, keyed only by a discovered rollout's session ID. */
+export async function searchSessionHistory(
+  sqliteHome: string,
+  session: Pick<Session, "sessionId"> & { threadId?: string },
+  revision: string,
+  query: string,
+  afterIndex = 0,
+): Promise<HistorySearchResult> {
+  if (!query || query.length > 256 || !Number.isSafeInteger(afterIndex) || afterIndex < 0) {
+    throw new Error("SQLite 查找文本需为 1 到 256 个 UTF-16 代码单元，起点需为非负安全整数。");
+  }
+  const { supplement } = await readSessionSupplementSnapshot(sqliteHome, session, {
+    revision, historySearch: { query, afterIndex },
+  });
+  const history = supplement.find((source) => source.database === "thread_history_1.sqlite");
+  const items = history?.tables.find((table) => table.table === "thread_items");
+  if (!history?.available || !items?.available || items.reason) {
+    throw new Error(history?.error ?? items?.reason ?? "SQLite 历史对话不可用。");
+  }
+  return history.search ?? { rowIndex: null, page: null, totalRows: 0 };
+}
+
 export async function readThreadSummaries(sqliteHome: string, sessions: Session[]): Promise<Map<string, JsonRecord>> {
   const result = new Map<string, JsonRecord>();
   if (!sessions.length) return result;
@@ -261,7 +314,7 @@ export async function readSessionSupplement(
   session: Pick<Session, "sessionId"> & { threadId?: string },
   { historyPage = 1 }: { historyPage?: number } = {},
 ): Promise<Array<{ database: string } & DatabaseReadResult>> {
-  const page = Number.isSafeInteger(historyPage) ? Math.min(10_000, Math.max(1, historyPage)) : 1;
+  const page = Number.isSafeInteger(historyPage) ? Math.min(MAX_HISTORY_PAGE, Math.max(1, historyPage)) : 1;
   const home = await realpath(sqliteHome).catch(() => path.resolve(sqliteHome));
   const wantedIds = [...new Set([session.sessionId, session.threadId].filter((value): value is string => typeof value === "string" && value.length > 0))];
   const sources: Array<{ database: string } & DatabaseReadResult> = [];

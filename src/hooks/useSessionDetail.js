@@ -67,6 +67,7 @@ export function useSessionDetail(sessionId, refreshVersion, {
   const [searchLoading, setSearchLoading] = useState(false);
   const [error, setError] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historySearchLoading, setHistorySearchLoading] = useState(false);
   const [retryVersion, setRetryVersion] = useState(0);
 
   const cacheRef = useRef(null);
@@ -78,6 +79,7 @@ export function useSessionDetail(sessionId, refreshVersion, {
   const pageRequestRef = useRef(null);
   const searchRequestRef = useRef(null);
   const historyRequestRef = useRef(null);
+  const historySearchRequestRef = useRef(null);
   const historyGenerationRef = useRef(0);
   const currentRolloutRef = useRef(null);
   const entriesRef = useRef(entries);
@@ -95,9 +97,13 @@ export function useSessionDetail(sessionId, refreshVersion, {
     cancelRequest(searchRequestRef);
     setSearchLoading(false);
   }, []);
+  const cancelHistorySearch = useCallback(() => {
+    cancelRequest(historySearchRequestRef);
+    setHistorySearchLoading(false);
+  }, []);
 
   useLayoutEffect(() => {
-    for (const ref of [windowRequestRef, pageRequestRef, searchRequestRef, historyRequestRef]) {
+    for (const ref of [windowRequestRef, pageRequestRef, searchRequestRef, historyRequestRef, historySearchRequestRef]) {
       ref.current?.task?.setPriority(active ? 1 : 0);
     }
   }, [active]);
@@ -342,6 +348,38 @@ export function useSessionDetail(sessionId, refreshVersion, {
     }
   }, [detail, sessionId]);
 
+  const searchHistory = useCallback(async (query, afterIndex = 0) => {
+    if (!detail?.supplementRevision) return undefined;
+    if (typeof query !== "string" || query.length < 1 || query.length > 256) return undefined;
+    cancelHistorySearch();
+    const controller = new AbortController();
+    const generation = generationRef.current;
+    const token = Symbol("history search");
+    const isCurrent = () => generationRef.current === generation && historySearchRequestRef.current?.token === token;
+    const task = enqueueSessionView(sessionId, {
+      view: "history-search", q: query, afterIndex, supplementRevision: detail.supplementRevision,
+    }, { signal: controller.signal, priority: activeRef.current ? 1 : 0, isCurrent });
+    historySearchRequestRef.current = { controller, task, token };
+    setHistorySearchLoading(true);
+    setError("");
+    try {
+      const value = await task.promise;
+      return isCurrent() && value !== STALE_SESSION_RESPONSE ? value : undefined;
+    } catch (reason) {
+      if (isCurrent() && reason?.name !== "AbortError") {
+        setError(isStaleRevision(reason)
+          ? "SQLite 数据已变化，请点击「刷新」加载新内容。当前已加载内容保持不变。"
+          : reason?.message || "SQLite 历史查找失败");
+      }
+      return undefined;
+    } finally {
+      if (isCurrent()) {
+        historySearchRequestRef.current = null;
+        setHistorySearchLoading(false);
+      }
+    }
+  }, [cancelHistorySearch, detail?.supplementRevision, sessionId]);
+
   const retry = useCallback(() => setRetryVersion((value) => value + 1), []);
 
   useEffect(() => {
@@ -351,6 +389,7 @@ export function useSessionDetail(sessionId, refreshVersion, {
     cancelPage();
     cancelSearch();
     cancelRequest(historyRequestRef);
+    cancelHistorySearch();
     historyGenerationRef.current += 1;
     cacheRef.current.clear();
 
@@ -367,10 +406,11 @@ export function useSessionDetail(sessionId, refreshVersion, {
       cancelPage();
       cancelSearch();
       cancelRequest(historyRequestRef);
+      cancelHistorySearch();
       historyGenerationRef.current += 1;
       cacheRef.current.clear();
     };
-  }, [cancelPage, cancelSearch, panelId, refreshVersion, retryVersion, runWindow, sessionId]);
+  }, [cancelPage, cancelSearch, cancelHistorySearch, panelId, refreshVersion, retryVersion, runWindow, sessionId]);
 
   return {
     detail,
@@ -382,9 +422,11 @@ export function useSessionDetail(sessionId, refreshVersion, {
     searchLoading,
     error,
     historyLoading,
+    historySearchLoading,
     loadLine,
     searchNext,
     loadHistoryPage,
+    searchHistory,
     recoverStaleRevision,
     retry,
   };

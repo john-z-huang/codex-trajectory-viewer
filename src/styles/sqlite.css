@@ -89,15 +89,71 @@
   padding-top: 8px;
 }
 
-.sqlite-table > summary {
-  cursor: pointer;
+.sqlite-table-heading {
+  margin: 0;
   font-size: 10px;
   color: #555860;
 }
 
-.sqlite-table > summary span {
+.sqlite-table-heading span,
+.sqlite-session-info-table h3 span {
   color: #999ba2;
   margin-left: 8px;
+  font-weight: 400;
+}
+
+.sqlite-conversation {
+  margin-top: 24px;
+}
+
+.sqlite-session-info-table h3 {
+  margin: 12px 0 8px;
+  font-size: 11px;
+  color: #555860;
+}
+
+.sqlite-session-info-row {
+  margin: 0;
+  padding: 10px 0;
+  border-top: 1px solid #f0f0f2;
+}
+
+.sqlite-session-info-row > div {
+  display: grid;
+  grid-template-columns: minmax(0, 140px) minmax(0, 1fr);
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.sqlite-session-info-row dt {
+  color: #858891;
+  overflow-wrap: anywhere;
+}
+
+.sqlite-session-info-row dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #40424a;
+}
+
+.sqlite-session-info-raw {
+  margin: 0 0 10px;
+}
+
+.sqlite-session-info-raw > summary {
+  cursor: pointer;
+  font-size: 10px;
+  color: #8c8e96;
+}
+
+@media (max-width: 600px) {
+  .sqlite-session-info-row > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
 }
 
 .sqlite-history-cards {
