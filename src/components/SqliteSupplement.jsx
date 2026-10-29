@@ -1,5 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { SqliteHistoryCard } from "./SqliteHistoryCard.jsx";
+import { ConversationTypeFilter } from "./ConversationTypeFilter.jsx";
+import { recordFilterType } from "../lib/conversation-types.js";
+import { SQLITE_ITEM_TYPES, sqliteItemType } from "../lib/sqlite-history.js";
+
+const EMPTY_ROWS = Object.freeze([]);
 
 function sameSet(left, right) {
   return left.size === right.size && [...left].every((value) => right.has(value));
@@ -7,6 +12,7 @@ function sameSet(left, right) {
 
 function SqliteTable({ table, active, historyLoading, onLoadHistoryPage }) {
   const [open, setOpen] = useState(false);
+  const [hiddenTypes, setHiddenTypes] = useState(() => new Set());
   const [visibleCardIndices, setVisibleCardIndices] = useState(new Set());
   const [navigationStatus, setNavigationStatus] = useState("");
   const tableRef = useRef(null);
@@ -14,7 +20,13 @@ function SqliteTable({ table, active, historyLoading, onLoadHistoryPage }) {
   const historyLoadingRef = useRef(historyLoading);
   const observerEpochRef = useRef(0);
   const pendingBoundaryRef = useRef(null);
-  const rows = Array.isArray(table.rows) ? table.rows : [];
+  const rows = Array.isArray(table.rows) ? table.rows : EMPTY_ROWS;
+  const typedRows = useMemo(() => rows.map((row, index) => ({
+    row,
+    index,
+    type: open && table.table === "thread_items" ? recordFilterType(sqliteItemType(row), SQLITE_ITEM_TYPES) : null,
+  })), [rows, table.table, open]);
+  const visibleRows = useMemo(() => typedRows.filter(({ type }) => type === null || !hiddenTypes.has(type)), [typedRows, hiddenTypes]);
   const pagination = table.pagination;
   const page = Number.isSafeInteger(pagination?.page) ? pagination.page : 0;
   const totalRows = Number.isSafeInteger(pagination?.totalRows) ? pagination.totalRows : 0;
@@ -61,11 +73,11 @@ function SqliteTable({ table, active, historyLoading, onLoadHistoryPage }) {
       observer.disconnect();
       if (observerEpochRef.current === observerEpoch) observerEpochRef.current += 1;
     };
-  }, [active, open, rows]);
+  }, [active, open, visibleRows]);
 
   function focusCard(direction) {
     if (!activeRef.current || !open) return false;
-    const targetIndex = direction === "first" ? 0 : rows.length - 1;
+    const targetIndex = (direction === "first" ? visibleRows[0] : visibleRows.at(-1))?.index;
     const card = tableRef.current?.querySelector(`[data-sqlite-index="${targetIndex}"]`);
     if (!card) return false;
     card.focus?.({ preventScroll: true });
@@ -131,7 +143,7 @@ function SqliteTable({ table, active, historyLoading, onLoadHistoryPage }) {
       pendingBoundaryRef.current = null;
       setNavigationStatus("SQLite 历史页面读取失败，无法完成定位。");
     }
-  }, [active, historyLoading, open, page, rows]);
+  }, [active, historyLoading, open, page, visibleRows]);
 
   return (
     <details
@@ -144,9 +156,20 @@ function SqliteTable({ table, active, historyLoading, onLoadHistoryPage }) {
         <span>{rows.length ? `${rows.length} 条` : table.reason ?? "没有关联记录"}</span>
       </summary>
       {open && table.reason && <p className="source-note">{table.reason}</p>}
+      {open && table.table === "thread_items" && (
+        <ConversationTypeFilter
+          options={SQLITE_ITEM_TYPES}
+          hiddenTypes={hiddenTypes}
+          onChange={(next) => { setHiddenTypes(next); setNavigationStatus(""); }}
+          visibleCount={visibleRows.length}
+          totalCount={rows.length}
+          note="筛选应用于每页历史项目；分页仍按全部记录。"
+        />
+      )}
+      {open && rows.length > 0 && !visibleRows.length && <p className="source-note" role="status">当前页的记录已全部隐藏，请调整显示类型或继续翻页。</p>}
       {open && (
         <div className="sqlite-history-cards">
-          {rows.map((row, index) => (
+          {visibleRows.map(({ row, index }) => (
             <SqliteHistoryCard
               table={table.table}
               row={row}

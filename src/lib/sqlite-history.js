@@ -13,6 +13,17 @@ const ITEM_LABELS = Object.freeze({
   functionCallOutput: "工具结果",
 });
 
+export const SQLITE_ITEM_TYPES = Object.freeze([
+  { value: "messages", label: "消息", children: ["userMessage", "agentMessage"].map((value) => ({ value, label: ITEM_LABELS[value] })) },
+  { value: "reasoning", label: ITEM_LABELS.reasoning },
+  { value: "tools", label: "工具活动", children: [
+    ...["commandExecution", "fileChange"].map((value) => ({ value, label: ITEM_LABELS[value] })),
+    { value: "calls", label: "工具调用", children: ["mcpToolCall", "dynamicToolCall"].map((value) => ({ value, label: ITEM_LABELS[value] })) },
+    { value: "functionCallOutput", label: ITEM_LABELS.functionCallOutput },
+  ] },
+  { value: "other", label: "其他类型" },
+]);
+
 const TABLE_LABELS = Object.freeze({
   threads: "会话信息",
   thread_turns: "会话轮次",
@@ -122,13 +133,21 @@ function parseItemPayload(row) {
   }
 }
 
-function itemProjection(row) {
-  const { payload, error } = parseItemPayload(row);
-  const type = typeof payload?.type === "string" && payload.type
+function itemType(row, payload) {
+  return typeof payload?.type === "string" && payload.type
     ? payload.type
     : typeof row?.item_type === "string" && row.item_type
       ? row.item_type
       : "unknown";
+}
+
+export function sqliteItemType(row) {
+  return itemType(row, parseItemPayload(row).payload);
+}
+
+function itemProjection(row) {
+  const { payload, error } = parseItemPayload(row);
+  const type = itemType(row, payload);
   const fields = [];
   const blocks = [];
   const actor = type === "userMessage"
