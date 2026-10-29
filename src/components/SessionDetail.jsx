@@ -105,9 +105,10 @@ export function SessionDetail({
             onRevisionStale={onRevisionStale}
           />
         )}
-        sqlite={(
+        sqlite={(sourceActive) => (
           <SqliteSupplement
             sources={detail.supplement}
+            active={sourceActive}
             historyLoading={historyLoading}
             onLoadHistoryPage={onLoadHistoryPage}
           />

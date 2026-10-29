@@ -174,7 +174,8 @@ test("SessionPanel 切换 JSONL / SQLite 保留两侧状态，history 翻页不�
     assert.equal(historyCall.url.searchParams.get("historyPage"), "2");
     assert.equal(historyCall.url.searchParams.get("supplementRevision"), "sqlite-revision-synthetic");
     assert.match(sqliteTable().textContent, /second SQLite history page/);
-    await act(async () => sqliteTable().querySelector(".sqlite-raw-toggle").click());
+    await act(async () => sqliteTable().querySelector("details.sqlite-raw-row summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    assert.equal(sqliteTable().querySelector("details.sqlite-raw-row").open, true, "SQLite raw JSON uses the native disclosure summary");
 
     searchResponse.resolve({ ok: true, status: 200, json: async () => ({
       revision: "rollout-revision-synthetic",

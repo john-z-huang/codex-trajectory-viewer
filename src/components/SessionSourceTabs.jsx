@@ -85,7 +85,7 @@ export function SessionSourceTabs({ active = true, jsonl, sqlite }) {
         tabIndex={0}
         hidden={selectedSource !== "sqlite"}
       >
-        {sqlite}
+        {typeof sqlite === "function" ? sqlite(active && selectedSource === "sqlite") : sqlite}
       </div>
     </div>
   );

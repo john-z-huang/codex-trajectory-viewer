@@ -5,6 +5,7 @@ import { parseRolloutText } from "../lib/rollout.js";
 import { enqueueSessionView, sessionViewUrl, SessionViewError, STALE_SESSION_RESPONSE } from "../lib/session-view-requests.js";
 import { getTextFragment, getTextFragmentCount, isLongText } from "../lib/text-fragments.js";
 import MarkdownContent from "./MarkdownContent.jsx";
+import { ConversationControls } from "./ConversationControls.jsx";
 
 const MAX_VISIBLE_CONTENT_PARTS = 32;
 const MAX_VISIBLE_CONTENT_CHARS = 16 * 1024;
@@ -473,26 +474,20 @@ export const TimelineEventCard = memo(function TimelineEventCard({
           <time>{formatDate(entry.timestamp)}</time>
           <span className="line-number">第 {entry.lineNumber} 行</span>
         </div>
-        <nav
-          className={`event-controls ${controlsVisible ? "is-visible" : ""}`}
-          aria-label={`第 ${entry.lineNumber} 行 JSONL 对象操作`}
-          aria-hidden={!controlsVisible}
-        >
-          <button type="button" onClick={copyEntryContent} aria-label="复制对话" title="复制对话" tabIndex={controlsVisible ? 0 : -1}>复制对话</button>
-          {copyPending.current && <button type="button" onClick={cancelCopy} aria-label="取消复制" title="取消复制" tabIndex={controlsVisible ? 0 : -1}>取消</button>}
-          <button
-            type="button"
-            onClick={toggleCollapse}
-            aria-label={collapsed ? `展开第 ${entry.lineNumber} 行 JSONL 对象` : `收起第 ${entry.lineNumber} 行 JSONL 对象`}
-            title={collapsed ? "展开对象" : "收起对话"}
-            tabIndex={controlsVisible ? 0 : -1}
-          >
-            {collapsed ? "展开" : "收起对话"}
-          </button>
-          <button type="button" data-timeline-action="first" onClick={(event) => onScrollToEntry(event, "first")} aria-label="回到会话开始处" title="回到会话开始处" tabIndex={controlsVisible ? 0 : -1}>↑</button>
-          <button type="button" data-timeline-action="last" onClick={(event) => onScrollToEntry(event, "last")} aria-label="跳转到会话末尾" title="跳转到会话末尾" tabIndex={controlsVisible ? 0 : -1}>↓</button>
-          <span className="event-copy-status" role="status" aria-live="polite">{copyStatus}</span>
-        </nav>
+        <ConversationControls
+          controlsVisible={controlsVisible}
+          controlsLabel={`第 ${entry.lineNumber} 行 JSONL 对象操作`}
+          collapsed={collapsed}
+          collapsedActionLabel={`收起第 ${entry.lineNumber} 行 JSONL 对象`}
+          expandedActionLabel={`展开第 ${entry.lineNumber} 行 JSONL 对象`}
+          onCopy={copyEntryContent}
+          onCancelCopy={cancelCopy}
+          copyPending={copyPending.current}
+          copyStatus={copyStatus}
+          onToggleCollapse={toggleCollapse}
+          onNavigateFirst={(event) => onScrollToEntry(event, "first")}
+          onNavigateLast={(event) => onScrollToEntry(event, "last")}
+        />
         {!collapsed && (
           <EventContent
             entry={entry}

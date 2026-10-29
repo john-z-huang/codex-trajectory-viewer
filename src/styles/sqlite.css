@@ -89,13 +89,13 @@
   padding-top: 8px;
 }
 
-.sqlite-table summary {
+.sqlite-table > summary {
   cursor: pointer;
   font-size: 10px;
   color: #555860;
 }
 
-.sqlite-table summary span {
+.sqlite-table > summary span {
   color: #999ba2;
   margin-left: 8px;
 }
@@ -112,6 +112,25 @@
   border-radius: 7px;
   background: #fff;
   padding: 10px 12px;
+}
+
+.sqlite-history-card .event-body {
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.sqlite-history-meta {
+  display: block;
+}
+
+.sqlite-history-copy-label {
+  margin: 0 0 5px;
+  color: #858891;
+  font-size: 9px;
+  font-weight: 600;
 }
 
 .sqlite-history-heading {

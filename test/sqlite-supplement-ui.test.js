@@ -93,8 +93,11 @@ test("SQLite 行 JSON 和分页控件只在表格展开时挂载", async () => {
     await act(async () => host.querySelectorAll(".history-pager button")[1].click());
     assert.deepEqual(requestedPages, [2]);
 
-    const rawToggle = host.querySelector(".sqlite-raw-toggle");
-    await act(async () => rawToggle.click());
+    const rawDetails = host.querySelector("details.sqlite-raw-row");
+    assert.equal(rawDetails.open, false);
+    assert.equal(rawDetails.querySelector("pre"), null, "raw SQLite JSON is not mounted while collapsed");
+    await act(async () => rawDetails.querySelector("summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    assert.equal(rawDetails.open, true, "the native disclosure opens through its summary");
     const rawChunk = host.querySelector(".sqlite-row");
     assert.ok(rawChunk.textContent.length <= 8_000, "only one bounded raw chunk mounts at once");
     const expectedRawRow = { ...sources[0].tables[0].rows[0], payload: `refreshed-payload-${"z".repeat(24_000)}` };
