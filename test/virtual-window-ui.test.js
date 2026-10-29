@@ -121,6 +121,20 @@ test("timeline and sidebar virtual windows bound rows, retain reading state, sea
   }
 
   const originalRect = window.HTMLElement.prototype.getBoundingClientRect;
+  const originalFocus = window.HTMLElement.prototype.focus;
+  const implicitFocusScrolls = [];
+  window.HTMLElement.prototype.focus = function focus(options) {
+    originalFocus.call(this, options);
+    // happy-dom does not implement the browser's focus-induced scrolling.
+    // Model it so overscan focus restoration cannot silently move the viewport.
+    const panel = this.closest?.('.session-tab-panel');
+    if (!panel || !this.classList?.contains('event-card') || options?.preventScroll) return;
+    const rect = this.getBoundingClientRect();
+    if (rect.top < 0 || rect.bottom > panel.clientHeight) {
+      implicitFocusScrolls.push(Number(this.dataset.entryIndex));
+      panel.scrollTop += rect.top < 0 ? rect.top : rect.bottom - panel.clientHeight;
+    }
+  };
   const measuredHeights = new Map();
   window.HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRect() {
     if (this.classList?.contains("timeline")) {
@@ -234,8 +248,21 @@ test("timeline and sidebar virtual windows bound rows, retain reading state, sea
     assert.ok(timeline.querySelectorAll(".event-card").length <= 100);
     assert.ok(timeline.contains(window.document.activeElement), "focus moves to a mounted card when the focused row scrolls out of the window");
     assert.ok(Number(window.document.activeElement.dataset.entryIndex) > 100);
+    assert.equal(panelLarge.scrollTop, 100_000, 'restoring focus after virtual unmount must not pull the viewport upward');
+    assert.deepEqual(implicitFocusScrolls, []);
     assert.ok(initialObserver.disconnectCount > 0, "observer subscriptions are released when the window changes");
     initialObserver.report(oldFirstCard, true); // A late callback from a disconnected window must be ignored.
+
+    for (const nextTop of [120_000, 150_000]) {
+      panelLarge.scrollTop = nextTop;
+      await act(async () => {
+        panelLarge.dispatchEvent(new window.Event('scroll'));
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+      assert.equal(panelLarge.scrollTop, nextTop, 'successive virtual windows preserve the user scroll position');
+      assert.ok(timeline.contains(window.document.activeElement), 'keyboard focus still follows the mounted window');
+      assert.deepEqual(implicitFocusScrolls, []);
+    }
 
     const anchorIndex = Math.floor((panelLarge.scrollTop - 80) / 176);
     const firstVisibleCard = [...timeline.querySelectorAll(".event-card")]
@@ -325,9 +352,61 @@ test("timeline and sidebar virtual windows bound rows, retain reading state, sea
     });
     assert.ok(TestResizeObserver.instances.every((observer) => observer.disconnectCount > 0), "closing all views releases every resize observer");
   } finally {
+    window.HTMLElement.prototype.focus = originalFocus;
     await vite?.close();
     window.HTMLElement.prototype.getBoundingClientRect = originalRect;
     restoreGlobals(original);
     window.happyDOM.abort();
+  }
+});
+
+test("测量补偿等待新虚拟高度提交，底部增长不被旧 scrollHeight 截断", async () => {
+  const window = new Window({ url: 'http://localhost/' });
+  const original = new Map();
+  for (const [key, value] of Object.entries({ window, document: window.document, navigator: window.navigator, HTMLElement: window.HTMLElement, Node: window.Node, ResizeObserver: TestResizeObserver, IS_REACT_ACT_ENVIRONMENT: true })) setGlobal(original, key, value);
+  const { createRoot } = await import('react-dom/client');
+  const panel = window.document.createElement('section');
+  window.document.body.append(panel);
+  Object.defineProperty(panel, 'clientHeight', { value: 100 });
+  let scrollTop = 0;
+  Object.defineProperty(panel, 'scrollTop', {
+    get: () => Math.max(0, Math.min(scrollTop, Number.parseFloat(panel.firstChild?.style.height || '0') - 100)),
+    set: (value) => { scrollTop = Math.max(0, Math.min(value, Number.parseFloat(panel.firstChild?.style.height || '0') - 100)); },
+  });
+  let vite;
+  const root = createRoot(panel);
+  const keys = Array.from({ length: 20 }, (_, i) => `key-${i}`);
+  const getScrollElement = () => panel;
+  try {
+    vite = await createServer({ configFile: new URL('../vite.config.js', import.meta.url).pathname, server: { middlewareMode: true, hmr: false }, appType: 'custom', logLevel: 'error' });
+    const { useVirtualWindow } = await vite.ssrLoadModule('/src/hooks/useVirtualWindow.js');
+    let virtual;
+    function Harness({ active = true }) {
+      virtual = useVirtualWindow({ itemKeys: keys, getScrollElement, enabled: active, estimatedHeight: 100, maxItems: 20 });
+      return React.createElement('div', { ref: virtual.listRef, style: { height: virtual.range.totalHeight } },
+        keys.map((key, i) => React.createElement('div', { key, ref: (node) => virtual.registerItem(key, node), 'data-virtual-key': key, 'data-virtual-index': i })));
+    }
+    await act(async () => root.render(React.createElement(Harness)));
+    panel.scrollTop = 1900;
+    await act(async () => virtual.refreshWindow());
+    const node = panel.querySelector('[data-virtual-index="18"]');
+    const observer = TestResizeObserver.instances.findLast((candidate) => candidate.targets.has(node));
+    await act(async () => observer.emit(node, 200));
+    assert.equal(panel.firstChild.style.height, '2100px');
+    assert.equal(panel.scrollTop, 2000, 'full correction applies after total height grows');
+    await act(async () => observer.emit(node, 100));
+    assert.equal(panel.scrollTop, 1900, 'shrink preserves the same anchor');
+    panel.scrollTop = 0;
+    await act(async () => virtual.refreshWindow());
+    await act(async () => observer.emit(node, 200));
+    assert.equal(panel.scrollTop, 0, 'content below the viewport does not move the top');
+    await act(async () => root.render(React.createElement(Harness, { active: false })));
+    await act(async () => observer.emit(node, 300));
+    assert.equal(panel.scrollTop, 0, 'late observer callbacks cannot move a background panel');
+  } finally {
+    await act(async () => root.unmount());
+    await vite?.close();
+    window.happyDOM.abort();
+    restoreGlobals(original);
   }
 });

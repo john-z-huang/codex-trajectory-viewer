@@ -37,7 +37,7 @@ export function SessionPanel({
       return (
         <div className="tab-state">
           <div className="error-banner" role="alert">
-            {error}<button type="button" onClick={retry}>重试</button>
+            {error}<button type="button" onClick={retry}>刷新</button>
           </div>
         </div>
       );

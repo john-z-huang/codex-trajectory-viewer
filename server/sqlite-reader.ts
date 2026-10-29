@@ -1,6 +1,7 @@
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { errorMessage, type JsonRecord, type Session } from "./types.js";
 
 const DATABASES = [
@@ -10,6 +11,24 @@ const DATABASES = [
  ] as const;
 const THREAD_KEYS: readonly string[] = ["thread_id", "threadId", "thread_id_str", "thread_uuid"];
 const ID_KEYS: readonly string[] = ["id", "thread_id", "threadId", "thread_id_str", "thread_uuid"];
+
+// Inspect only the allowlisted databases and their WAL identities, never rows or
+// user-provided paths. WAL writes can change data without touching the main DB.
+export async function readSupplementRevision(sqliteHome: string): Promise<string> {
+  const home = await realpath(sqliteHome).catch(() => path.resolve(sqliteHome));
+  const identities = await Promise.all(DATABASES.map(async ({ filename }) => {
+    try {
+      const resolved = await resolveDatabasePath(home, filename);
+      return await Promise.all([resolved, `${resolved}-wal`].map(async (file) => {
+        try {
+          const info = await stat(file, { bigint: true });
+          return [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].map(String);
+        } catch { return ["unavailable"]; }
+      }));
+    } catch { return ["unavailable"]; }
+  }));
+  return createHash("sha256").update(JSON.stringify(identities)).digest("hex");
+}
 
 function jsonSafe(row: Record<string, SQLOutputValue>): JsonRecord {
   return Object.fromEntries(Object.entries(row).map(([key, value]) => [

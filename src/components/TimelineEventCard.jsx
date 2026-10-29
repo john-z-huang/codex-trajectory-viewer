@@ -210,7 +210,7 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
       .catch((reason) => {
         if (!isCurrent() || reason?.name === "AbortError") return;
         if (isStaleRevision(reason)) {
-          setError("轨迹版本已变化；当前页正在恢复，请重新打开原文。");
+          setError("轨迹版本已变化，请点击「刷新」后重新打开原文。");
           void onRevisionStale?.(entry.lineNumber, locator?.revision);
         } else if (reason?.status === 416) {
           setError(`${reason.message} 可返回原文起点后重试。`);
@@ -422,7 +422,7 @@ export const TimelineEventCard = memo(function TimelineEventCard({
         if (!isCurrent() || reason?.name === "AbortError") return;
         copyPending.current = false;
         if (isStaleRevision(reason)) {
-          setCopyStatus("轨迹版本已变化，正在恢复当前页");
+          setCopyStatus("轨迹版本已变化，请点击「刷新」后重试复制");
           void onRevisionStale?.(entry.lineNumber, locator.revision);
         } else setCopyStatus(reason?.message || "完整记录读取失败");
       })

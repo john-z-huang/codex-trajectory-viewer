@@ -79,7 +79,6 @@ export function useSessionDetail(sessionId, refreshVersion, {
   const searchRequestRef = useRef(null);
   const historyRequestRef = useRef(null);
   const historyGenerationRef = useRef(0);
-  const recoveryRef = useRef(null);
   const currentRolloutRef = useRef(null);
   const entriesRef = useRef(entries);
   const anchorLineRef = useRef(1);
@@ -156,21 +155,13 @@ export function useSessionDetail(sessionId, refreshVersion, {
     }
   }, [applyWindow, cancelSearch, panelId, refreshVersion, sessionId]);
 
-  const recoverStaleRevision = useCallback(async (line, staleRevision, { preserveSearch = false } = {}) => {
-    const revision = typeof staleRevision === "string" ? staleRevision : currentRolloutRef.current?.revision;
-    if (recoveryRef.current?.revision === revision) return recoveryRef.current.promise;
-    const generation = generationRef.current;
-    const anchor = Math.max(1, Number.isSafeInteger(line) ? line : anchorLineRef.current);
+  const recoverStaleRevision = useCallback(async () => {
     cancelPage();
-    if (!preserveSearch) cancelSearch();
-    cacheRef.current.clear();
-    setEntries([]);
-    setPageLoading(true);
-    setError("");
-    const promise = runWindow(anchor, generation, { forceClear: true, preserveSearch });
-    recoveryRef.current = { revision, promise };
-    return promise;
-  }, [cancelPage, cancelSearch, runWindow]);
+    cancelSearch();
+    setPageLoading(false);
+    setError("会话文件已变化，请点击「刷新」加载新内容。当前已加载内容保持不变。");
+    return false;
+  }, [cancelPage, cancelSearch]);
 
   const loadLine = useCallback(async (line) => {
     const current = currentRolloutRef.current;
@@ -204,9 +195,6 @@ export function useSessionDetail(sessionId, refreshVersion, {
     const token = Symbol("page request");
     const controller = new AbortController();
     const isCurrent = () => generationRef.current === generation && pageRequestRef.current?.token === token;
-    setEntries([]); // Unmount the prior page so raw chunks and in-flight copy portals are released.
-    setCurrentLine(target);
-    anchorLineRef.current = target;
     setPageLoading(true);
     setError("");
     const task = enqueueSessionView(sessionId, { view: "page", revision: current.revision, line: target }, {
@@ -226,6 +214,8 @@ export function useSessionDetail(sessionId, refreshVersion, {
       currentRolloutRef.current = nextRollout;
       setRollout(nextRollout);
       setEntries(page.entries);
+      setCurrentLine(target);
+      anchorLineRef.current = target;
       setPageLoading(false);
       setError("");
       return true;
@@ -290,19 +280,8 @@ export function useSessionDetail(sessionId, refreshVersion, {
         }
       } catch (reason) {
         if (!isStaleRevision(reason)) throw reason;
-        const recovered = await recoverStaleRevision(anchorLineRef.current, current.revision, { preserveSearch: true });
-        if (searchOperationRef.current !== operation) return undefined;
-        if (!recovered) throw reason;
-        const nextRevision = currentRolloutRef.current?.revision;
-        if (!nextRevision) throw reason;
-        const nextAfterLine = Math.min(startAfter, currentRolloutRef.current?.totalLines ?? 0);
-        setSearchLoading(true);
-        lineNumber = await requestSearch(query, nextAfterLine, nextRevision, generation, operation);
-        if (searchOperationRef.current !== operation) return undefined;
-        if (lineNumber === null && nextAfterLine > 0) {
-          lineNumber = await requestSearch(query, 0, nextRevision, generation, operation);
-          if (searchOperationRef.current !== operation) return undefined;
-        }
+        await recoverStaleRevision();
+        return undefined;
       }
       return lineNumber;
     } catch (reason) {
@@ -327,7 +306,7 @@ export function useSessionDetail(sessionId, refreshVersion, {
       && historyGenerationRef.current === request
       && historyRequestRef.current?.token === token;
     setHistoryLoading(true);
-    const task = enqueueSessionView(sessionId, { view: "history", historyPage: page }, {
+    const task = enqueueSessionView(sessionId, { view: "history", historyPage: page, supplementRevision: detail.supplementRevision }, {
       signal: controller.signal,
       priority: activeRef.current ? 1 : 0,
       isCurrent,
@@ -340,7 +319,9 @@ export function useSessionDetail(sessionId, refreshVersion, {
       setError("");
     } catch (reason) {
       if (isCurrent() && reason?.name !== "AbortError") {
-        const message = reason instanceof SessionViewError && Number.isSafeInteger(reason.status)
+        const message = isStaleRevision(reason)
+          ? "SQLite 数据已变化，请点击「刷新」加载新内容。当前已加载内容保持不变。"
+          : reason instanceof SessionViewError && Number.isSafeInteger(reason.status)
           ? `SQLite 历史读取失败（${reason.status}）`
           : reason?.message || "SQLite 历史读取失败";
         setError(message);
@@ -364,8 +345,7 @@ export function useSessionDetail(sessionId, refreshVersion, {
     cancelRequest(historyRequestRef);
     historyGenerationRef.current += 1;
     cacheRef.current.clear();
-    recoveryRef.current = null;
-    setEntries([]);
+
     setLoading(true);
     setPageLoading(true);
     setError("");

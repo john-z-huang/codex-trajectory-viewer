@@ -11,7 +11,7 @@
 - 时间线和侧栏只挂载可见窗口。会话按 32 个物理行分页，支持首尾定位、原始行号跳转及区分大小写的原文查找；跨页保留折叠和阅读状态。
 - 原始 JSON 展开后才读取当前片段，关闭后释放；超长内容可分段阅读或下载完整原文。“复制对话”保持完整可读文本，超长记录仅在点击复制时临时读取和渲染。
 - Markdown 渲染禁用原始 HTML，过滤危险链接协议，图片只显示替代文本，不自动请求远程图片。
-- 页面通过手动刷新读取本地快照，不提供实时跟随、统计图或跨会话对比。
+- 页面首次打开时读取本地快照，此后新内容仅通过手动点击「刷新」加载。翻页、查找、原文读取和复制遇到版本变化只提示刷新，并保留已显示内容。
 
 ## 开发
 
@@ -39,13 +39,13 @@ npm start
 
 - `GET /api/sessions` 返回从允许的会话目录发现并补充 SQLite 元数据的会话摘要。
 - `GET /api/sessions/:id` 返回已发现会话的详情、JSONL 原文、SQLite 补充数据和关联子代理。`:id` 是不透明会话 ID，不接受文件路径。
-- `GET /api/sessions/:id?view=history&historyPage=1` 只返回 SQLite 补充数据，不读取或返回完整 JSONL。`historyPage` 默认第 1 页，每页 50 条；兼容详情接口也接受该参数。
+- `GET /api/sessions/:id?view=history&historyPage=1&supplementRevision=...` 只返回 SQLite 补充数据，不读取或返回完整 JSONL。正式页面携带窗口返回的 `supplementRevision`，数据库或 WAL 变化时返回 `409`，需手动刷新；省略版本参数保留旧 API 兼容。`historyPage` 默认第 1 页，每页 50 条；兼容详情接口也接受该参数。
 - `GET /api/sessions/:id?view=window&line=1` 返回会话元数据、SQLite 补充数据、子代理摘要，以及包含目标行的 32 行窗口。响应中的 `rollout` 提供版本 `revision`、总行数和当前行范围；超长行保留定位信息，原文另行读取。
 - `GET /api/sessions/:id?view=page&revision=...&line=33` 只返回该版本的行窗口。每行最多返回 64 KiB 原始 UTF-8 内容，超限行通过原文接口访问；JSON 转义后的响应字节数可能更大。
 - `GET /api/sessions/:id?view=raw&revision=...&line=1&offset=0` 返回最多 16 KiB、保持 UTF-8 字符完整的原文片段。`offset` 是行内字节偏移，后续请求使用响应的 `nextOffset`；`view=download&revision=...&line=1` 流式下载完整单行原文。
 - `GET /api/sessions/:id?view=search&revision=...&q=...&afterLine=0` 在原始行中进行区分大小写的字面量查找，返回下一条匹配行号；查询最多 256 个 UTF-16 code units，不跨行匹配。
 
-分页、原文和查找接口都只接受已发现会话的 ID。文件追加、截断、重写或替换使旧版本失效，接口返回 `409`，客户端须重新获取窗口。索引在服务端内存中按需构建，不写入 Codex 数据目录。
+分页、原文和查找接口都只接受已发现会话的 ID。文件追加、截断、重写或替换使旧版本失效，接口返回 `409`；客户端保留当前已加载内容，等待用户点击「刷新」，不自动获取新窗口。SQLite 版本按整个允许列表中的数据库及 WAL 文件身份校验，其他会话写入也可能要求刷新。索引在服务端内存中按需构建，不写入 Codex 数据目录。
 
 正式页面使用窗口接口；旧完整详情接口保留兼容。每个标签的展示页缓存最多保留 4 页、4 MiB 序列化 UTF-8 数据，被淘汰的页可重新读取。该预算不等于浏览器总堆上限；已打开标签的元数据和阅读状态仍会保留，显式完整复制也会产生临时占用。详情、翻页、查找、原文片段和复制请求共享最多 2 个并发请求，刷新优先处理活动标签并覆盖全部已打开标签。完整原文下载由浏览器直接处理。
 
@@ -66,7 +66,7 @@ npm start
 src/
   main.jsx                     前端入口
   components/                  侧栏、工作区、标签面板、详情和内容展示
-  hooks/useSessionDetail.js    有界轨迹页、版本恢复、查找与历史分页状态
+  hooks/useSessionDetail.js    有界轨迹页、手动刷新、查找与历史分页状态
   hooks/useVirtualWindow.js    动态高度窗口、滚动定位与测量清理
   lib/                         Rollout 解析、项目分组、会话身份、标签及 Markdown 处理
   styles/                      按界面职责拆分的样式
