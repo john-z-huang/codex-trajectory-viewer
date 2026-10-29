@@ -39,6 +39,30 @@ test("JSONL 对象卡片独立收起、定位首末对象，并只在可见活�
   TestIntersectionObserver.instances = [];
   const window = new Window({ url: "http://localhost/" });
   const original = new Map();
+  const rawByLine = new Map([
+    [1, '{"secret":"Raw JSON must not copy"}'],
+    [2, '{"fixture":2}'],
+    [3, '{"secret":"non-text original data"}'],
+  ]);
+  const rawRequests = [];
+  const fetchSyntheticView = async (input) => {
+    const url = new URL(input, "http://localhost/");
+    const params = url.searchParams;
+    const line = Number(params.get("line"));
+    const raw = rawByLine.get(line) ?? "{}";
+    rawRequests.push({ view: params.get("view"), line, offset: Number(params.get("offset") ?? 0) });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        offset: 0,
+        nextOffset: new TextEncoder().encode(raw).byteLength,
+        byteLength: new TextEncoder().encode(raw).byteLength,
+        done: true,
+        raw,
+      }),
+    };
+  };
   const globals = {
     window,
     document: window.document,
@@ -49,6 +73,7 @@ test("JSONL 对象卡片独立收起、定位首末对象，并只在可见活�
     requestAnimationFrame: window.requestAnimationFrame.bind(window),
     cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
     IntersectionObserver: TestIntersectionObserver,
+    fetch: fetchSyntheticView,
     IS_REACT_ACT_ENVIRONMENT: true,
   };
   let clipboardText = "";
@@ -110,18 +135,32 @@ test("JSONL 对象卡片独立收起、定位首末对象，并只在可见活�
     const panel = host.firstElementChild;
     root = createRoot(panel);
 
+    const largeMarkdown = "Synthetic **rendered** first object\n\nSecond paragraph\n\n```js\nconst result = 1;\n```\n\n- list alpha\n- list beta\n\n".repeat(220);
     const entries = [
-      { lineNumber: 1, timestamp: "2026-10-19T00:00:00Z", kind: "user", title: "Metadata title must not copy", markdown: true, text: "Synthetic **rendered** first object\n\nSecond paragraph", raw: '{"secret":"Raw JSON must not copy"}' },
-      { lineNumber: 2, timestamp: "2026-10-19T00:00:01Z", kind: "assistant", title: "Assistant message", text: "Synthetic last object", raw: '{"fixture":2}' },
+      { lineNumber: 1, timestamp: "2026-10-19T00:00:00Z", kind: "user", title: "Metadata title must not copy", markdown: true, text: largeMarkdown, originalLocator: { revision: "synthetic-revision" } },
+      { lineNumber: 2, timestamp: "2026-10-19T00:00:01Z", kind: "assistant", title: "Assistant message", text: "Synthetic last object", originalLocator: { revision: "synthetic-revision" } },
+      { lineNumber: 3, timestamp: "2026-10-19T00:00:02Z", kind: "tool-result", title: "Synthetic MCP result", contentParts: [{ kind: "plain", text: '{"type":"image","data":"opaque"}' }], originalLocator: { revision: "synthetic-revision" } },
     ];
-    await act(async () => root.render(React.createElement(Timeline, { entries })));
+    await act(async () => root.render(React.createElement(Timeline, { entries, sessionId: "synthetic-session" })));
 
     const cards = [...panel.querySelectorAll(".event-card")];
     const firstMeta = cards[0].querySelector(".event-meta");
     const firstContent = cards[0].querySelector(".event-content");
-    assert.equal(cards.length, 2);
-    assert.equal(panel.querySelectorAll(".event-controls").length, 2);
+    assert.equal(cards.length, 3);
+    assert.ok(firstContent.querySelector(".event-fragment-note"), "large Markdown is explicitly shown as bounded plain-text fragments");
+    assert.match(firstContent.querySelector(".event-fragment-controls")?.textContent ?? "", /第 1 \/ 2 段/);
+    assert.equal(panel.querySelectorAll(".event-controls").length, 3);
     assert.equal(cards[0].querySelector(".event-controls").getAttribute("aria-hidden"), "true");
+    assert.equal(cards[0].querySelector("details pre"), null, "raw JSON text is not mounted before opening details");
+    const rawDetails = cards[0].querySelector("details");
+    await act(async () => {
+      rawDetails.querySelector("summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.match(rawDetails.querySelector("pre")?.textContent ?? "", /Raw JSON must not copy/);
+    await act(async () => rawDetails.querySelector("summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    assert.equal(cards[0].querySelector("details pre"), null, "closing details releases its raw JSON node");
+    assert.deepEqual(rawRequests[0], { view: "raw", line: 1, offset: 0 }, "raw text is read from the bounded API by opaque session and physical line");
     const observer = TestIntersectionObserver.instances.at(-1);
     assert.ok(observer);
     assert.equal(observer.options.root, panel);
@@ -174,6 +213,10 @@ test("JSONL 对象卡片独立收起、定位首末对象，并只在可见活�
       await Promise.resolve();
     });
     assert.match(clipboardText, /Synthetic\s+rendered\s+first object/);
+    assert.match(clipboardText, /const result = 1;/);
+    assert.match(clipboardText, /list alpha[\s\S]*list beta/);
+    assert.doesNotMatch(clipboardText, /```|\*\*/);
+    assert.ok((clipboardText.match(/Synthetic rendered first object/g) ?? []).length > 100, "explicit copying renders every Markdown page");
     assert.doesNotMatch(clipboardText, /Metadata title must not copy|Raw JSON must not copy|原始 JSON|复制对话/);
     assert.equal(cards[0].querySelector('[role="status"]')?.textContent, "已复制");
 
@@ -235,7 +278,7 @@ test("JSONL 对象卡片独立收起、定位首末对象，并只在可见活�
     assert.equal(window.getComputedStyle(controls).visibility, "visible");
     assert.equal(timers.size, 1);
     assert.equal(cards[0].querySelector(".event-text"), null);
-    assert.equal(cards[0].querySelector(".event-content")?.textContent.includes("Second paragraph"), true);
+    assert.equal(cards[0].querySelector(".event-content"), null, "collapsing releases the rendered body subtree");
     assert.equal(cards[0].querySelector(".event-meta")?.textContent.includes("Metadata title must not copy"), true);
     assert.equal(cards[0].querySelector('[aria-label="展开第 1 行 JSONL 对象"]')?.textContent, "展开");
     assert.match(cards[1].textContent, /Synthetic last object/);
@@ -276,6 +319,21 @@ test("JSONL 对象卡片独立收起、定位首末对象，并只在可见活�
     assert.equal(window.getComputedStyle(controls).visibility, "visible");
     assert.equal(timers.size, 0);
 
+    await act(async () => observer.report(cards[2], true));
+    cards[2].querySelector(".event-meta").getBoundingClientRect = () => ({ top: 120, bottom: 160 });
+    await act(async () => cards[2].querySelector('[aria-label="收起第 3 行 JSONL 对象"]')
+      .dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    assert.equal(cards[2].querySelector(".event-content"), null);
+    await act(async () => {
+      cards[2].querySelector('[aria-label="复制对话"]')
+        .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    assert.match(clipboardText, /"type":"image"/);
+    assert.doesNotMatch(clipboardText, /non-text original data|原始 JSON/);
+    await advanceTimers(3000);
+    assert.equal(timers.size, 0);
+
     await act(async () => cards[0].querySelector('[aria-label="展开第 1 行 JSONL 对象"]')
       .dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
     assert.deepEqual(centerScrollCalls, [{ top: 680, behavior: "smooth" }]);
@@ -286,14 +344,13 @@ test("JSONL 对象卡片独立收起、定位首末对象，并只在可见活�
     panel.getBoundingClientRect = () => ({ top: 100 });
     cards[0].getBoundingClientRect = () => ({ top: 150 });
     cards[1].getBoundingClientRect = () => ({ top: 480 });
+    cards[2].getBoundingClientRect = () => ({ top: 480 });
     await act(async () => cards[0].querySelector('[aria-label="跳转到会话末尾"]')
       .dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
     await act(async () => cards[0].querySelector('[aria-label="回到会话开始处"]')
       .dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
-    assert.deepEqual(scrollCalls, [
-      { top: 410, behavior: "smooth" },
-      { top: 80, behavior: "smooth" },
-    ]);
+    assert.deepEqual(scrollCalls, [], "virtualized edge navigation addresses data indices directly");
+    assert.ok(Number.isFinite(panel.scrollTop));
 
     panel.hidden = true;
     await act(async () => observer.report(cards[0], true));

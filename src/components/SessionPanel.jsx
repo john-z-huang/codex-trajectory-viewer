@@ -1,24 +1,69 @@
-import { useMemo } from "react";
-import { parseRolloutText } from "../lib/rollout.js";
 import { useSessionDetail } from "../hooks/useSessionDetail.js";
 import { SessionDetail } from "./SessionDetail.jsx";
 
-export function SessionPanel({ sessionId, refreshVersion, onOpenSession }) {
-  const { detail, loading, error, historyLoading, loadHistoryPage } = useSessionDetail(sessionId, refreshVersion);
-  const timeline = useMemo(() => detail ? parseRolloutText(detail.contents) : [], [detail?.contents]);
+export function SessionPanel({
+  sessionId,
+  panelId = sessionId,
+  refreshVersion,
+  active = false,
+  onRequestStart,
+  onRequestSettled,
+  onOpenSession,
+}) {
+  const {
+    detail,
+    rollout,
+    entries,
+    currentLine,
+    loading,
+    pageLoading,
+    searchLoading,
+    error,
+    historyLoading,
+    loadLine,
+    searchNext,
+    loadHistoryPage,
+    recoverStaleRevision,
+    retry,
+  } = useSessionDetail(sessionId, refreshVersion, {
+    panelId,
+    active,
+    onRequestStart,
+    onRequestSettled,
+  });
 
   if (!detail) {
-    if (error) return <div className="tab-state"><div className="error-banner" role="alert">{error}</div></div>;
+    if (error) {
+      return (
+        <div className="tab-state">
+          <div className="error-banner" role="alert">
+            {error}<button type="button" onClick={retry}>重试</button>
+          </div>
+        </div>
+      );
+    }
     return <div className="tab-state" role="status">{loading ? "正在读取会话…" : "会话内容不可用"}</div>;
   }
 
   return (
     <>
-      {error && <div className="error-banner" role="alert">{error}</div>}
+      {error && (
+        <div className="error-banner" role="alert">
+          {error}<button type="button" onClick={retry}>重试</button>
+        </div>
+      )}
       <SessionDetail
         detail={detail}
-        timeline={timeline}
+        timeline={entries}
+        rollout={rollout}
+        currentLine={currentLine}
+        pageLoading={pageLoading}
+        searchLoading={searchLoading}
+        active={active}
         historyLoading={historyLoading}
+        onNavigateLine={loadLine}
+        onSearch={searchNext}
+        onRevisionStale={recoverStaleRevision}
         onLoadHistoryPage={loadHistoryPage}
         onOpenSession={onOpenSession}
       />

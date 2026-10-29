@@ -3,7 +3,21 @@ import { sessionDisplayTitle } from "../lib/session-identity.js";
 import { SqliteSupplement } from "./SqliteSupplement.jsx";
 import { Timeline } from "./Timeline.jsx";
 
-export function SessionDetail({ detail, timeline, historyLoading, onLoadHistoryPage, onOpenSession }) {
+export function SessionDetail({
+  detail,
+  timeline,
+  rollout,
+  currentLine,
+  pageLoading,
+  searchLoading,
+  active = true,
+  historyLoading,
+  onNavigateLine,
+  onSearch,
+  onRevisionStale,
+  onLoadHistoryPage,
+  onOpenSession,
+}) {
   return (
     <>
       <div className="session-header">
@@ -21,7 +35,7 @@ export function SessionDetail({ detail, timeline, historyLoading, onLoadHistoryP
             {detail.source ? ` · ${detail.source}` : ""}
           </p>
         </div>
-        <div className="event-count"><strong>{timeline.length}</strong><small>条记录</small></div>
+        <div className="event-count"><strong>{rollout?.totalLines ?? timeline.length}</strong><small>条记录</small></div>
       </div>
 
       {detail.agent && (
@@ -74,7 +88,18 @@ export function SessionDetail({ detail, timeline, historyLoading, onLoadHistoryP
         </section>
       )}
 
-      <Timeline entries={timeline} />
+      <Timeline
+        entries={timeline}
+        rollout={rollout}
+        currentLine={currentLine}
+        pageLoading={pageLoading}
+        searchLoading={searchLoading}
+        sessionId={detail.id}
+        active={active}
+        onNavigateLine={onNavigateLine}
+        onSearch={onSearch}
+        onRevisionStale={onRevisionStale}
+      />
       <SqliteSupplement
         sources={detail.supplement}
         historyLoading={historyLoading}

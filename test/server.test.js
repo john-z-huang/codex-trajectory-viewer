@@ -76,6 +76,14 @@ test("仅发现 sessions / archived_sessions 下的 JSONL，并拒绝任意路�
   assert.equal(activeSummary.source, "cli");
   assert.equal(activeSummary.archived, false);
   assert.equal(activeSummary.updatedAt, "2026-01-03T00:00:00.000Z");
+  const historyProjectionResponse = await fetch(`${base}/api/sessions/${activeSummary.id}?view=history&historyPage=2`);
+  assert.equal(historyProjectionResponse.status, 200);
+  const historyProjection = await historyProjectionResponse.json();
+  assert.deepEqual(Object.keys(historyProjection), ["supplement"]);
+  assert.equal(historyProjection.supplement.length, 3);
+  const projectedHistory = historyProjection.supplement.find((source) => source.database === "thread_history_1.sqlite")
+    .tables.find((table) => table.table === "thread_turns");
+  assert.deepEqual(projectedHistory.rows.map((row) => row.rollout_ordinal), [50, 51, 52]);
   const detail = await (await fetch(`${base}/api/sessions/${sessions[0].id}`)).json();
   assert.match(detail.contents, /\{bad/);
   assert.equal(detail.supplement.length, 3);
@@ -85,7 +93,7 @@ test("仅发现 sessions / archived_sessions 下的 JSONL，并拒绝任意路�
   const nextDetail = await (await fetch(`${base}/api/sessions/${sessions[0].id}?historyPage=2`)).json();
   const secondHistoryPage = nextDetail.supplement.find((source) => source.database === "thread_history_1.sqlite").tables.find((table) => table.table === "thread_turns");
   assert.deepEqual(secondHistoryPage.rows.map((row) => row.rollout_ordinal), [50, 51, 52]);
-  const denied = await fetch(`${base}/api/sessions/${encodeURIComponent(Buffer.from("../../outside/secret.jsonl").toString("base64url"))}`);
+  const denied = await fetch(`${base}/api/sessions/${encodeURIComponent(Buffer.from("../../outside/secret.jsonl").toString("base64url"))}?view=history`);
   assert.equal(denied.status, 404);
   for (const [file, hash] of filesBefore) assert.equal(createHash("sha256").update(await readFile(file)).digest("hex"), hash, `${path.basename(file)} must remain unchanged`);
 });

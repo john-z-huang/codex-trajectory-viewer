@@ -1,5 +1,17 @@
-.project-group {
-  margin: 0 0 14px;
+.project-group-row {
+  min-width: 0;
+}
+
+.project-group-heading-row {
+  margin: 0;
+}
+
+.project-group-last-session {
+  padding-bottom: 14px;
+}
+
+.project-group-session .session-item {
+  padding: 9px 10px;
 }
 
 .project-heading {
@@ -39,10 +51,6 @@
   flex: none;
   color: #a0a2a9;
   font-size: 9px;
-}
-
-.project-group .session-item {
-  padding: 9px 10px;
 }
 
 .session-icon.archived {

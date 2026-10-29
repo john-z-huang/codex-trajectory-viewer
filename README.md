@@ -7,7 +7,9 @@
 - 发现活动与归档 JSONL 会话；按工作目录完整路径分组，支持搜索项目和会话。优先使用 SQLite `threads.cwd`，缺失时回退到 rollout `session_meta.cwd`；没有工作目录的会话归入“项目未知”。
 - 显示子代理身份、父会话和执行状态；子代理可作为独立会话打开。Guardian 会话单独标识，不按子代理处理。
 - 侧栏与会话详情独立滚动。每个会话在应用内只保留一个标签；再次从侧栏或会话详情打开时激活已有标签。已打开面板持续挂载，切换后保留会话内容与阅读位置，关闭标签后释放对应面板资源。
-- 按时间顺序展示消息、工具调用、工具结果、未知事件和损坏行。用户/助手正文及已识别的工具文本项支持 Markdown；原始 JSON 和命令输出仍以纯文本呈现。
+- 按 JSONL 原始行序展示消息、工具调用、工具结果、未知事件和损坏行。用户/助手正文及已识别的工具文本项支持 Markdown；原始 JSON 和命令输出仍以纯文本呈现。
+- 时间线和侧栏只挂载可见窗口。会话按 32 个物理行分页，支持首尾定位、原始行号跳转及区分大小写的原文查找；跨页保留折叠和阅读状态。
+- 原始 JSON 展开后才读取当前片段，关闭后释放；超长内容可分段阅读或下载完整原文。“复制对话”保持完整可读文本，超长记录仅在点击复制时临时读取和渲染。
 - Markdown 渲染禁用原始 HTML，过滤危险链接协议，图片只显示替代文本，不自动请求远程图片。
 - 页面通过手动刷新读取本地快照，不提供实时跟随、统计图或跨会话对比。
 
@@ -37,7 +39,15 @@ npm start
 
 - `GET /api/sessions` 返回从允许的会话目录发现并补充 SQLite 元数据的会话摘要。
 - `GET /api/sessions/:id` 返回已发现会话的详情、JSONL 原文、SQLite 补充数据和关联子代理。`:id` 是不透明会话 ID，不接受文件路径。
-- 可选查询参数 `historyPage` 指定 SQLite 历史页，默认第 1 页，每页 50 条。翻页仍使用会话详情接口。
+- `GET /api/sessions/:id?view=history&historyPage=1` 只返回 SQLite 补充数据，不读取或返回完整 JSONL。`historyPage` 默认第 1 页，每页 50 条；兼容详情接口也接受该参数。
+- `GET /api/sessions/:id?view=window&line=1` 返回会话元数据、SQLite 补充数据、子代理摘要，以及包含目标行的 32 行窗口。响应中的 `rollout` 提供版本 `revision`、总行数和当前行范围；超长行保留定位信息，原文另行读取。
+- `GET /api/sessions/:id?view=page&revision=...&line=33` 只返回该版本的行窗口。每行最多返回 64 KiB 原始 UTF-8 内容，超限行通过原文接口访问；JSON 转义后的响应字节数可能更大。
+- `GET /api/sessions/:id?view=raw&revision=...&line=1&offset=0` 返回最多 16 KiB、保持 UTF-8 字符完整的原文片段。`offset` 是行内字节偏移，后续请求使用响应的 `nextOffset`；`view=download&revision=...&line=1` 流式下载完整单行原文。
+- `GET /api/sessions/:id?view=search&revision=...&q=...&afterLine=0` 在原始行中进行区分大小写的字面量查找，返回下一条匹配行号；查询最多 256 个 UTF-16 code units，不跨行匹配。
+
+分页、原文和查找接口都只接受已发现会话的 ID。文件追加、截断、重写或替换使旧版本失效，接口返回 `409`，客户端须重新获取窗口。索引在服务端内存中按需构建，不写入 Codex 数据目录。
+
+正式页面使用窗口接口；旧完整详情接口保留兼容。每个标签的展示页缓存最多保留 4 页、4 MiB 序列化 UTF-8 数据，被淘汰的页可重新读取。该预算不等于浏览器总堆上限；已打开标签的元数据和阅读状态仍会保留，显式完整复制也会产生临时占用。详情、翻页、查找、原文片段和复制请求共享最多 2 个并发请求，刷新优先处理活动标签并覆盖全部已打开标签。完整原文下载由浏览器直接处理。
 
 ## 数据边界
 
@@ -48,7 +58,7 @@ npm start
 - `thread_turns` 与 `thread_items` 通过 `historyPage` 参数每页读取 50 行，页面提供前后翻页；其他 SQLite 表每表最多返回 500 行。单行文本限制在 12,000 个字符。
 - 服务绑定 IPv4 回环地址 `127.0.0.1`。它不写入、复制或上传 Codex 会话数据，也不连接远程服务。
 - 每一行单独解析。未知记录保留完整原始 JSON；无效 JSON 行保留原文并显示解析错误，不会中断整份会话。
-- 查看器按记录时间戳排序；时间相同时按 JSONL 原始行序排列。无时间戳记录位于有时间戳记录之后，并保持原始行序。
+- 查看器保持 JSONL 物理行序，不按时间戳重排；空行、无时间戳记录及损坏行均可按原始行号定位。复杂或超长记录的预览可以降级为说明，完整原文仍可访问。
 
 ## 主要目录结构
 
@@ -56,7 +66,8 @@ npm start
 src/
   main.jsx                     前端入口
   components/                  侧栏、工作区、标签面板、详情和内容展示
-  hooks/useSessionDetail.js    会话详情读取与历史分页状态
+  hooks/useSessionDetail.js    有界轨迹页、版本恢复、查找与历史分页状态
+  hooks/useVirtualWindow.js    动态高度窗口、滚动定位与测量清理
   lib/                         Rollout 解析、项目分组、会话身份、标签及 Markdown 处理
   styles/                      按界面职责拆分的样式
   style.css                    样式模块入口
@@ -64,6 +75,7 @@ server/
   index.ts                     本地 HTTP 服务组合与启动
   session-discovery.ts         会话发现与摘要
   session-api.ts               会话列表和详情 API
+  rollout-reader.ts            有界行窗口、稀疏索引、版本校验、原文与查找
   static-files.ts              生产静态文件服务
   sqlite-reader.ts             只读 SQLite 读取
   subagents.ts                 子代理识别与关联

@@ -6,15 +6,20 @@ export function SessionWorkspace({
   tabState,
   dispatchTabs,
   activeSession,
+  activeTabId,
   refreshVersion,
   loading,
   error,
   onRefresh,
   onOpenSession,
+  onRequestStart,
+  onRequestSettled,
+  onPanelClosed,
 }) {
-  function closeTab(event, tabId) {
+  function closeTab(event, tab) {
     event.stopPropagation();
-    dispatchTabs({ type: "close", id: tabId });
+    onPanelClosed?.(tab.id);
+    dispatchTabs({ type: "close", id: tab.id });
   }
 
   return (
@@ -55,7 +60,7 @@ export function SessionWorkspace({
                 type="button"
                 aria-label={`关闭会话标签：${label}`}
                 title="关闭标签"
-                onClick={(event) => closeTab(event, tab.id)}
+                onClick={(event) => closeTab(event, tab)}
               >
                 ×
               </button>
@@ -75,7 +80,11 @@ export function SessionWorkspace({
           >
             <SessionPanel
               sessionId={tab.sessionId}
+              panelId={tab.id}
               refreshVersion={refreshVersion}
+              active={tab.id === activeTabId}
+              onRequestStart={onRequestStart}
+              onRequestSettled={onRequestSettled}
               onOpenSession={onOpenSession}
             />
           </section>
