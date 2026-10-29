@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
+import { RolloutReaderError, type RolloutReaderStore } from "./rollout-reader.js";
 import { readSessionSupplement, readThreadSummaries } from "./sqlite-reader.js";
 import { linkSubagents, subagentActivityFromRollout } from "./subagents.js";
 import { discoverSessions, mergeThreadSummary } from "./session-discovery.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Session, SessionSummary } from "./types.js";
+import type { Session, SessionSummary, SubagentActivity } from "./types.js";
 
 interface SessionApiOptions {
   request: IncomingMessage;
@@ -11,6 +12,7 @@ interface SessionApiOptions {
   url: URL;
   home: string;
   sqliteHome: string;
+  reader: RolloutReaderStore;
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -18,7 +20,149 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
   response.end(JSON.stringify(body));
 }
 
-export async function handleSessionApi({ request, response, url, home, sqliteHome }: SessionApiOptions): Promise<boolean> {
+function queryInteger(url: URL, name: string, minimum: number, fallback?: number): number | null | undefined {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return fallback;
+  if (!/^(?:0|[1-9][0-9]*)$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= minimum ? value : null;
+}
+
+function validRevision(url: URL): string | null {
+  const revision = url.searchParams.get("revision");
+  return revision && revision.length <= 256 ? revision : null;
+}
+
+function sendReadError(response: ServerResponse, error: unknown): void {
+  if (response.destroyed || response.writableEnded) return;
+  if (error instanceof RolloutReaderError) {
+    sendJson(response, error.status, { error: error.message, code: error.code });
+    return;
+  }
+  if (error instanceof Error && error.name === "AbortError") return;
+  sendJson(response, 500, { error: "Unable to read rollout" });
+}
+
+function readAbortContext(request: IncomingMessage, response: ServerResponse): {
+  signal: AbortSignal;
+  dispose(): void;
+} {
+  const controller = new AbortController();
+  const onAborted = () => controller.abort();
+  const onClose = () => {
+    if (!response.writableEnded) controller.abort();
+  };
+  request.once("aborted", onAborted);
+  response.once("close", onClose);
+  if ((request.destroyed && !request.complete) || response.destroyed) controller.abort();
+  return {
+    signal: controller.signal,
+    dispose() {
+      request.off("aborted", onAborted);
+      response.off("close", onClose);
+    },
+  };
+}
+
+function abortError(): Error {
+  const error = new Error("Operation aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+async function writeChunkWithBackpressure(response: ServerResponse, chunk: Buffer, signal: AbortSignal): Promise<void> {
+  if (signal.aborted || response.destroyed) throw abortError();
+  if (response.write(chunk)) return;
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      response.off("drain", onDrain);
+      response.off("error", onError);
+      response.off("close", onClose);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const onDrain = () => { cleanup(); resolve(); };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const onClose = () => { cleanup(); reject(abortError()); };
+    const onAbort = () => { cleanup(); reject(abortError()); };
+    response.once("drain", onDrain);
+    response.once("error", onError);
+    response.once("close", onClose);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted || response.destroyed) onAbort();
+    else if (!response.writableNeedDrain) onDrain();
+  });
+}
+
+async function sendLineDownload(
+  reader: RolloutReaderStore,
+  filePath: string,
+  revision: string,
+  lineNumber: number,
+  response: ServerResponse,
+  signal: AbortSignal,
+): Promise<void> {
+  const iterator = reader.streamLine(filePath, revision, lineNumber, signal)[Symbol.asyncIterator]();
+  try {
+    let next = await iterator.next();
+    if (signal.aborted) return;
+    response.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Disposition": `attachment; filename="rollout-line-${lineNumber}.txt"`,
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "no-store",
+    });
+    while (!next.done) {
+      await writeChunkWithBackpressure(response, next.value, signal);
+      next = await iterator.next();
+    }
+    if (!response.destroyed) response.end();
+  } catch (error) {
+    if (response.headersSent) response.destroy();
+    else sendReadError(response, error);
+  } finally {
+    try { await iterator.return?.(undefined); } catch { /* The response is already ending. */ }
+  }
+}
+
+async function buildSubagentProjection(
+  parent: Session,
+  sessions: Session[],
+  activities: SubagentActivity[],
+  sqliteHome: string,
+) {
+  const linkedSubagents = linkSubagents(parent, sessions, activities);
+  const childSessions = linkedSubagents
+    .map((link) => link.session)
+    .filter((session): session is Session => session !== null);
+  const childThreads = await readThreadSummaries(sqliteHome, childSessions);
+  const subagents = linkedSubagents.map((link) => {
+    if (!link.session) {
+      return {
+        threadId: link.threadId,
+        agent: link.agent,
+        activityStatus: link.status,
+        available: false,
+        reason: link.reason,
+      };
+    }
+    return {
+      ...mergeThreadSummary(link.session, childThreads.get(String(link.session.sessionId))),
+      threadId: link.threadId,
+      agent: link.agent ?? link.session._agent,
+      activityStatus: link.status,
+      available: true,
+      reason: null,
+    };
+  });
+  return subagents;
+}
+
+function withRolloutWarnings<T extends { summaryWarning: string | null }>(rollout: T) {
+  const { summaryWarning, ...metadata } = rollout;
+  return { ...metadata, warnings: summaryWarning ? [summaryWarning] : [] };
+}
+
+export async function handleSessionApi({ request, response, url, home, sqliteHome, reader }: SessionApiOptions): Promise<boolean> {
   if (url.pathname === "/api/sessions") {
     const sessions: Session[] = await discoverSessions(home);
     const threads = await readThreadSummaries(sqliteHome, sessions);
@@ -56,35 +200,115 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
     return true;
   }
 
-  const contents = await readFile(match._path, "utf8");
-  const thread = (await readThreadSummaries(sqliteHome, [match])).get(String(match.sessionId));
-  const linkedSubagents = linkSubagents(match, sessions, subagentActivityFromRollout(contents));
-  const childSessions = linkedSubagents.map((link) => link.session).filter((session): session is Session => session !== null);
-  const childThreads = await readThreadSummaries(sqliteHome, childSessions);
   const requestedHistoryPage = Number(url.searchParams.get("historyPage") ?? 1);
   const historyPage = Number.isSafeInteger(requestedHistoryPage) && requestedHistoryPage > 0
     ? Math.min(requestedHistoryPage, 10_000)
     : 1;
-  const supplement = await readSessionSupplement(sqliteHome, match, { historyPage });
-  const subagents = linkedSubagents.map((link) => {
-    if (!link.session) {
-      return {
-        threadId: link.threadId,
-        agent: link.agent,
-        activityStatus: link.status,
-        available: false,
-        reason: link.reason,
-      };
+  const view = url.searchParams.get("view");
+  if (view === "history") {
+    const supplement = await readSessionSupplement(sqliteHome, match, { historyPage });
+    sendJson(response, 200, { supplement });
+    return true;
+  }
+
+  const pagedViews = new Set(["window", "page", "raw", "download", "search"]);
+  if (view !== null && !pagedViews.has(view)) {
+    sendJson(response, 400, { error: "Unsupported session view", code: "invalid_view" });
+    return true;
+  }
+
+  if (view !== null) {
+    const cancellation = readAbortContext(request, response);
+    try {
+      if (view === "window") {
+        const line = queryInteger(url, "line", 1, 1);
+        if (line == null) {
+          sendJson(response, 400, { error: "line must be a positive safe integer", code: "invalid_line" });
+          return true;
+        }
+        const [window, threads, supplement] = await Promise.all([
+          reader.readWindow(match._path, line, cancellation.signal),
+          readThreadSummaries(sqliteHome, [match]),
+          readSessionSupplement(sqliteHome, match, { historyPage }),
+        ]);
+        const activities = window.activities;
+        const subagents = await buildSubagentProjection(match, sessions, activities, sqliteHome);
+        sendJson(response, 200, {
+          ...mergeThreadSummary(match, threads.get(String(match.sessionId))),
+          supplement,
+          subagents,
+          rollout: withRolloutWarnings(window.rollout),
+          lines: window.lines,
+        });
+        return true;
+      }
+
+      const revision = validRevision(url);
+      if (!revision) {
+        sendJson(response, 400, { error: "revision is required", code: "invalid_revision" });
+        return true;
+      }
+
+      if (view === "page") {
+        const line = queryInteger(url, "line", 1);
+        if (line == null) {
+          sendJson(response, 400, { error: "line must be a positive safe integer", code: "invalid_line" });
+          return true;
+        }
+        sendJson(response, 200, await reader.readPage(match._path, revision, line, cancellation.signal));
+        return true;
+      }
+
+      if (view === "raw" || view === "download") {
+        const line = queryInteger(url, "line", 1);
+        if (line == null) {
+          sendJson(response, 400, { error: "line must be a positive safe integer", code: "invalid_line" });
+          return true;
+        }
+        if (view === "download") {
+          await sendLineDownload(reader, match._path, revision, line, response, cancellation.signal);
+          return true;
+        }
+        const offset = queryInteger(url, "offset", 0, 0);
+        if (offset == null) {
+          sendJson(response, 400, { error: "offset must be a non-negative safe integer", code: "invalid_offset" });
+          return true;
+        }
+        sendJson(response, 200, await reader.readRawChunk(match._path, revision, line, offset, cancellation.signal));
+        return true;
+      }
+
+      if (view === "search") {
+        const query = url.searchParams.get("q");
+        if (!query || query.length > 256) {
+          sendJson(response, 400, { error: "q must contain 1 to 256 UTF-16 code units", code: "invalid_query" });
+          return true;
+        }
+        const afterLine = queryInteger(url, "afterLine", 0, 0);
+        if (afterLine == null) {
+          sendJson(response, 400, { error: "afterLine must be a non-negative safe integer", code: "invalid_after_line" });
+          return true;
+        }
+        sendJson(response, 200, await reader.search(match._path, revision, query, afterLine, cancellation.signal));
+        return true;
+      }
+    } catch (error) {
+      if (response.headersSent) {
+        if (!response.destroyed) response.destroy();
+      } else {
+        sendReadError(response, error);
+      }
+      return true;
+    } finally {
+      cancellation.dispose();
     }
-    return {
-      ...mergeThreadSummary(link.session, childThreads.get(String(link.session.sessionId))),
-      threadId: link.threadId,
-      agent: link.agent ?? link.session._agent,
-      activityStatus: link.status,
-      available: true,
-      reason: null,
-    };
-  });
+  }
+
+  const contents = await readFile(match._path, "utf8");
+  const thread = (await readThreadSummaries(sqliteHome, [match])).get(String(match.sessionId));
+  const activities = subagentActivityFromRollout(contents);
+  const subagents = await buildSubagentProjection(match, sessions, activities, sqliteHome);
+  const supplement = await readSessionSupplement(sqliteHome, match, { historyPage });
   sendJson(response, 200, { ...mergeThreadSummary(match, thread), contents, supplement, subagents });
   return true;
 }

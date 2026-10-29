@@ -117,6 +117,8 @@ const eventTitles = {
 };
 
 function classify(record) {
+  if (record === null || typeof record !== "object") return primitiveView(record);
+  if (Array.isArray(record)) return primitiveView(record);
   const type = record?.type ?? "unknown";
   const payload = record?.payload ?? {};
   if (type === "session_meta" || type === "session_meta_entry") return { kind: "metadata", title: "会话元数据", text: textFrom(payload.initial_user_message) };
@@ -133,7 +135,7 @@ function classify(record) {
     if (event === "user_message") return { kind: "user", title: "用户消息", text: textFrom(detail.message ?? detail.content), markdown: true };
     if (event === "agent_message") return { kind: "assistant", title: "助手消息", text: textFrom(detail.message ?? detail.content), markdown: true };
     if (event === "exec_command_begin" || event === "mcp_tool_call_begin") return { kind: "tool-call", title: detail.command ?? detail.tool ?? event, text: readableFields(detail) };
-    if (event === "mcp_tool_call_end") return { kind: "tool-result", title: `${detail.tool ?? detail.invocation?.name ?? event} · 结果`, contentParts: mcpToolResultParts(detail.result), text: readableFields(detail) };
+    if (event === "mcp_tool_call_end") return { kind: "tool-result", title: `${detail.tool ?? detail.invocation?.name ?? event} · 结果`, contentParts: mcpToolResultParts(detail.result) };
     if (event === "exec_command_end") return { kind: "tool-result", title: `${detail.command ?? event} · 结果`, text: readableFields(detail) };
     if (event === "item_completed" && detail.item) {
       const eventFields = Object.fromEntries(Object.entries(detail).filter(([key]) => key !== "item"));
@@ -144,23 +146,223 @@ function classify(record) {
   return { kind: "event", title: recordTitles[type] ?? type, text: readableFields(payload) };
 }
 
-/** Parse JSONL without discarding malformed or future event records. */
-export function parseRolloutText(source) {
-  const entries = source.split(/\r?\n/).flatMap((raw, index) => {
-    if (!raw.trim()) return [];
-    let record;
-    try { record = JSON.parse(raw); }
-    catch (error) {
-      return [{ lineNumber: index + 1, timestamp: null, kind: "invalid", title: "无法解析的记录", text: error.message, raw, record: null }];
+const MAX_ROLLOUT_PAGE_LINES = 32;
+const MAX_PROJECTION_DEPTH = 32;
+const MAX_PROJECTION_NODES = 4096;
+const MAX_PROJECTION_BYTES = 64 * 1024;
+const MAX_PROJECTION_TITLE_LENGTH = 256;
+const MAX_LOCATOR_FIELD_LENGTH = 512;
+const projectionEncoder = new TextEncoder();
+
+function byteLengthOf(value) {
+  return projectionEncoder.encode(value).byteLength;
+}
+
+function normalizedLineNumber(line, index) {
+  return Number.isSafeInteger(line?.lineNumber) && line.lineNumber > 0 ? line.lineNumber : index + 1;
+}
+
+function timestampFor(record) {
+  if (!record || typeof record !== "object") return null;
+  const timestamp = record.timestamp;
+  if (typeof timestamp === "string") return timestamp.length <= MAX_LOCATOR_FIELD_LENGTH ? timestamp : null;
+  if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
+  return null;
+}
+
+function legacyTimestamp(record) {
+  return record && typeof record === "object" ? record.timestamp ?? null : null;
+}
+
+function locatorFor({ revision, sessionId }, lineNumber) {
+  const locator = { lineNumber };
+  if ((typeof revision === "string" || typeof revision === "number") && String(revision).length <= MAX_LOCATOR_FIELD_LENGTH) {
+    locator.revision = revision;
+  }
+  if (typeof sessionId === "string" && sessionId.length <= MAX_LOCATOR_FIELD_LENGTH) {
+    locator.sessionId = sessionId;
+  }
+  return locator;
+}
+
+function treeExceedsProjectionLimits(root) {
+  const pending = [{ value: root, depth: 0 }];
+  let nodes = 0;
+  while (pending.length) {
+    const { value, depth } = pending.pop();
+    nodes += 1;
+    if (nodes > MAX_PROJECTION_NODES || depth > MAX_PROJECTION_DEPTH) return true;
+    if (value && typeof value === "object") {
+      const children = Array.isArray(value) ? value : Object.values(value);
+      for (const child of children) pending.push({ value: child, depth: depth + 1 });
     }
+  }
+  return false;
+}
+
+function primitiveView(record) {
+  if (record === null) return { kind: "event", title: "JSON null", text: "null" };
+  if (Array.isArray(record)) return { kind: "event", title: "JSON 数组", text: readableFields(record) };
+  return { kind: "event", title: "JSON 原始值", text: String(record) };
+}
+
+function normalizeProjectionView(view) {
+  if (!view || typeof view !== "object" || Array.isArray(view)) return null;
+  if (typeof view.kind !== "string" || typeof view.title !== "string" && typeof view.title !== "number" && typeof view.title !== "boolean") return null;
+  if (view.text !== undefined && typeof view.text !== "string" && typeof view.text !== "number" && typeof view.text !== "boolean") return null;
+  if (view.markdown !== undefined && typeof view.markdown !== "boolean") return null;
+  if (view.contentParts !== undefined && !Array.isArray(view.contentParts)) return null;
+
+  let title = String(view.title);
+  let titleTruncated = false;
+  if (title.length > MAX_PROJECTION_TITLE_LENGTH) {
+    let end = MAX_PROJECTION_TITLE_LENGTH - 1;
+    const lastIncluded = title.charCodeAt(end - 1);
+    const firstExcluded = title.charCodeAt(end);
+    if (lastIncluded >= 0xd800 && lastIncluded <= 0xdbff && firstExcluded >= 0xdc00 && firstExcluded <= 0xdfff) end -= 1;
+    title = `${title.slice(0, end)}…`;
+    titleTruncated = true;
+  }
+
+  let contentParts;
+  if (view.contentParts) {
+    contentParts = [];
+    for (const part of view.contentParts) {
+      if (!part || typeof part !== "object" || Array.isArray(part) || typeof part.text !== "string") return null;
+      if (part.kind !== undefined && typeof part.kind !== "string") return null;
+      contentParts.push({ ...(part.kind === undefined ? {} : { kind: part.kind }), text: part.text });
+    }
+  }
+
+  return {
+    kind: view.kind,
+    title,
+    ...(titleTruncated ? { titleTruncated: true } : {}),
+    ...(view.text === undefined ? {} : { text: String(view.text) }),
+    ...(contentParts === undefined ? {} : { contentParts }),
+    ...(view.markdown === undefined ? {} : { markdown: view.markdown }),
+  };
+}
+
+function limitedProjection(lineNumber, originalLocator, reason, { timestamp = null, oversized = false } = {}) {
+  return {
+    lineNumber,
+    timestamp,
+    kind: "oversized",
+    title: oversized ? "记录超过预览上限" : "记录预览受限",
+    text: reason,
+    ...(oversized ? { oversized: true } : { projectionLimited: true }),
+    originalLocator,
+  };
+}
+
+function invalidProjection(lineNumber, originalLocator, message) {
+  return {
+    lineNumber,
+    timestamp: null,
+    kind: "invalid",
+    title: "无法解析的记录",
+    text: String(message || "无法识别该记录").slice(0, 240),
+    originalLocator,
+  };
+}
+
+function projectRolloutLine(line, index, context) {
+  const lineNumber = normalizedLineNumber(line, index);
+  const originalLocator = locatorFor(context, lineNumber);
+  const raw = line?.raw;
+  const reportedByteLength = Number.isSafeInteger(line?.byteLength) && line.byteLength >= 0 ? line.byteLength : null;
+
+  if (line?.oversized || (reportedByteLength !== null && reportedByteLength > MAX_PROJECTION_BYTES) || (typeof raw === "string" && byteLengthOf(raw) > MAX_PROJECTION_BYTES)) {
+    return limitedProjection(lineNumber, originalLocator, "此行超过轻量预览上限；可通过原文入口读取完整内容。", { oversized: true });
+  }
+  if (typeof raw !== "string") {
+    return invalidProjection(lineNumber, originalLocator, "当前页未提供原始行内容；可通过原文入口重新读取。");
+  }
+  if (raw === "") {
+    return {
+      lineNumber,
+      timestamp: null,
+      kind: "empty",
+      title: "空行",
+      text: "（空物理行）",
+      originalLocator,
+    };
+  }
+
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch (error) {
+    return invalidProjection(lineNumber, originalLocator, error?.message ?? "无效 JSON");
+  }
+
+  if (treeExceedsProjectionLimits(record)) {
+    return limitedProjection(lineNumber, originalLocator, "此行的 JSON 深度或节点数超过轻量预览上限；可通过原文入口读取完整内容。");
+  }
+
+  try {
+    const rawView = classify(record);
+    const view = normalizeProjectionView(rawView);
+    if (!view) {
+      return limitedProjection(lineNumber, originalLocator, "此行包含无法安全显示的结构字段；可通过原文入口读取完整内容。");
+    }
+    const projected = {
+      lineNumber,
+      timestamp: timestampFor(record),
+      ...view,
+      originalLocator,
+    };
+    const serialized = JSON.stringify(projected);
+    if (byteLengthOf(serialized) > MAX_PROJECTION_BYTES) {
+      return limitedProjection(lineNumber, originalLocator, "此行的展示投影超过 64 KiB；可通过原文入口读取完整内容。", { timestamp: projected.timestamp });
+    }
+    return projected;
+  } catch (error) {
+    return invalidProjection(lineNumber, originalLocator, `无法生成记录预览：${error?.message ?? "未知错误"}`);
+  }
+}
+
+/**
+ * Build a bounded page view without retaining source rows or parsed records.
+ * The server owns the physical-line page size; this helper defensively accepts
+ * at most 32 rows, matching the page API contract.
+ */
+export function projectRolloutLines(lines, { revision, sessionId } = {}) {
+  if (!Array.isArray(lines)) return [];
+  return lines.slice(0, MAX_ROLLOUT_PAGE_LINES).map((line, index) => projectRolloutLine(line, index, { revision, sessionId }));
+}
+
+function parseRawLine(raw, lineNumber) {
+  if (!raw.trim()) return null;
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch (error) {
+    return { lineNumber, timestamp: null, kind: "invalid", title: "无法解析的记录", text: error?.message ?? "无效 JSON", raw, record: null };
+  }
+
+  try {
     const view = classify(record);
-    return [{ lineNumber: index + 1, timestamp: record.timestamp ?? null, ...view, raw, record }];
-  });
-  return entries.sort((a, b) => {
-    if (a.timestamp && b.timestamp) return a.timestamp.localeCompare(b.timestamp) || a.lineNumber - b.lineNumber;
-    if (a.timestamp) return -1;
-    if (b.timestamp) return 1;
-    return a.lineNumber - b.lineNumber;
+    return { lineNumber, timestamp: legacyTimestamp(record), ...view, raw, record };
+  } catch (error) {
+    return {
+      lineNumber,
+      timestamp: legacyTimestamp(record),
+      kind: "invalid",
+      title: "无法生成记录展示",
+      text: error?.message ?? "未知错误",
+      raw,
+      record,
+    };
+  }
+}
+
+/** Parse JSONL in physical line order without discarding malformed records. */
+export function parseRolloutText(source) {
+  return source.split(/\r?\n/).flatMap((raw, index) => {
+    const entry = parseRawLine(raw, index + 1);
+    return entry ? [entry] : [];
   });
 }
 

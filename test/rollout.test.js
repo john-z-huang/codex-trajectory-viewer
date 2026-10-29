@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseRolloutText, previewFromRecord } from "../src/lib/rollout.js";
+import { parseRolloutText, previewFromRecord, projectRolloutLines } from "../src/lib/rollout.js";
 
-test("解析消息、工具调用、未知事件和坏行并按时间戳稳定排序", () => {
+const syntheticLine = (lineNumber, raw) => ({ lineNumber, byteLength: new TextEncoder().encode(raw).byteLength, raw });
+
+test("解析消息、工具调用、未知事件和坏行并保留物理行顺序", () => {
   const input = [
     JSON.stringify({ timestamp: "2026-01-02T00:00:02Z", type: "response_item", payload: { type: "function_call", name: "exec_command", arguments: "ls" } }),
     "{broken",
@@ -10,13 +12,122 @@ test("解析消息、工具调用、未知事件和坏行并按时间戳稳定�
     JSON.stringify({ timestamp: "2026-01-02T00:00:02Z", type: "new_future_event", payload: { keep: true } }),
   ].join("\n");
   const entries = parseRolloutText(input);
-  assert.deepEqual(entries.map((entry) => entry.lineNumber), [3, 1, 4, 2]);
-  assert.equal(entries[0].kind, "user");
-  assert.equal(entries[1].kind, "tool-call");
-  assert.equal(entries[1].raw.includes('"function_call"'), true);
-  assert.equal(entries[2].title, "new_future_event");
+  assert.deepEqual(entries.map((entry) => entry.lineNumber), [1, 2, 3, 4]);
+  assert.equal(entries[0].kind, "tool-call");
+  assert.equal(entries[0].raw.includes('"function_call"'), true);
+  assert.equal(entries[1].kind, "invalid");
+  assert.equal(entries[1].raw, "{broken");
+  assert.equal(entries[2].kind, "user");
+  assert.equal(entries[3].title, "new_future_event");
+});
+
+test("JSON null、primitive 与深层分类异常逐行保留原记录", () => {
+  let deeplyNested = "0";
+  for (let index = 0; index < 5000; index += 1) deeplyNested = `{"a":${deeplyNested}}`;
+  const deepRaw = `{"type":"future_record","payload":${deeplyNested}}`;
+  const input = ["null", "42", '"primitive"', deepRaw, "{broken"].join("\n");
+
+  const entries = parseRolloutText(input);
+
+  assert.deepEqual(entries.map((entry) => entry.lineNumber), [1, 2, 3, 4, 5]);
+  assert.deepEqual(entries.slice(0, 3).map((entry) => entry.record), [null, 42, "primitive"]);
+  assert.deepEqual(entries.slice(0, 3).map((entry) => entry.text), ["null", "42", "primitive"]);
   assert.equal(entries[3].kind, "invalid");
-  assert.equal(entries[3].raw, "{broken");
+  assert.equal(entries[3].raw, deepRaw);
+  assert.equal(JSON.stringify(entries[3].record), deepRaw);
+  assert.equal(entries[4].kind, "invalid");
+  assert.equal(entries[4].raw, "{broken");
+});
+
+test("轻量页按物理行顺序生成受限卡片并只携带原文 locator", () => {
+  const lines = [
+    syntheticLine(4, JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "fixture" }] } })),
+    syntheticLine(5, ""),
+    syntheticLine(6, "null"),
+    syntheticLine(7, "42"),
+    syntheticLine(8, "{broken"),
+    syntheticLine(9, JSON.stringify({ type: "future_record", payload: { keep: true } })),
+  ];
+
+  const entries = projectRolloutLines(lines, { revision: "synthetic-revision", sessionId: "synthetic-session" });
+
+  assert.deepEqual(entries.map((entry) => entry.lineNumber), [4, 5, 6, 7, 8, 9]);
+  assert.equal(entries[0].kind, "user");
+  assert.equal(entries[0].text, "fixture");
+  assert.equal(entries[1].kind, "empty");
+  assert.equal(entries[1].text, "（空物理行）");
+  assert.equal(entries[2].text, "null");
+  assert.equal(entries[3].text, "42");
+  assert.equal(entries[4].kind, "invalid");
+  assert.equal(entries[5].title, "future_record");
+  for (const entry of entries) {
+    assert.ok(new TextEncoder().encode(JSON.stringify(entry)).byteLength <= 64 * 1024);
+    assert.deepEqual(entry.originalLocator, { lineNumber: entry.lineNumber, revision: "synthetic-revision", sessionId: "synthetic-session" });
+    assert.equal(Object.hasOwn(entry, "raw"), false);
+    assert.equal(Object.hasOwn(entry, "record"), false);
+    assert.equal(Object.hasOwn(entry, "contents"), false);
+  }
+});
+
+test("轻量标题预览限制为 256 个 UTF-16 单位并显式标记省略，完整原文仍可定位", () => {
+  const toolName = `${"x".repeat(254)}😀${"long-name-".repeat(100)}`;
+  const raw = JSON.stringify({ type: "response_item", payload: { type: "function_call", name: toolName, arguments: "{}" } });
+  const [entry] = projectRolloutLines([syntheticLine(65, raw)], { revision: "title-revision", sessionId: "synthetic-session" });
+
+  assert.equal(entry.title, `${"x".repeat(254)}…`, "preview ends before a surrogate pair and uses an ellipsis");
+  assert.ok(entry.title.length <= 256);
+  assert.equal(entry.titleTruncated, true);
+  assert.deepEqual(entry.originalLocator, { lineNumber: 65, revision: "title-revision", sessionId: "synthetic-session" });
+  assert.equal(entry.text, "{}");
+  assert.equal(Object.hasOwn(entry, "raw"), false, "full raw text remains available through the locator rather than the projection");
+});
+
+test("轻量页最多投影 32 行，超长、超深、节点过多和派生过大记录提供原文入口", () => {
+  const page = Array.from({ length: 40 }, (_, index) => ({ lineNumber: index + 1, raw: JSON.stringify({ type: "future_record", payload: { index } }) }));
+  const view = projectRolloutLines(page, { revision: "rev" });
+  assert.equal(view.length, 32);
+  assert.equal(view.at(-1).lineNumber, 32);
+
+  let deepValue = "0";
+  for (let index = 0; index < 33; index += 1) deepValue = `{"a":${deepValue}}`;
+  const tooDeep = JSON.stringify({ type: "future_record", payload: JSON.parse(deepValue) });
+  const tooManyNodes = JSON.stringify({ type: "future_record", payload: { items: Array.from({ length: 4097 }, () => 0) } });
+  let expandedValue = Array.from({ length: 1100 }, () => "x");
+  for (let index = 0; index < 30; index += 1) expandedValue = [expandedValue];
+  const derivedTooLarge = JSON.stringify({ type: "future_record", payload: { nested: expandedValue } });
+
+  const limited = projectRolloutLines([
+    { lineNumber: 1, byteLength: 70 * 1024, oversized: true },
+    { lineNumber: 2, raw: tooDeep },
+    { lineNumber: 3, raw: tooManyNodes },
+    { lineNumber: 4, raw: derivedTooLarge },
+  ], { revision: "rev" });
+
+  assert.equal(limited[0].oversized, true);
+  assert.equal(limited[1].projectionLimited, true);
+  assert.equal(limited[2].projectionLimited, true);
+  assert.equal(limited[3].projectionLimited, true);
+  assert.ok(limited.every((entry) => entry.originalLocator.revision === "rev"));
+  assert.ok(limited.every((entry) => !Object.hasOwn(entry, "raw") && !Object.hasOwn(entry, "record")));
+});
+
+test("畸形但合法的 JSON 展示字段会降级为原文 descriptor", () => {
+  const records = [
+    { type: {} },
+    { type: "response_item", payload: { type: "function_call", name: { bad: true }, arguments: { raw: "object" } } },
+    { type: "event_msg", payload: { exec_command_begin: { command: ["echo", "x"] } } },
+  ];
+  const projected = projectRolloutLines(records.map((record, index) => syntheticLine(index + 1, JSON.stringify(record))), { revision: "rev" });
+
+  assert.equal(projected.length, records.length);
+  for (const entry of projected) {
+    assert.equal(entry.projectionLimited, true);
+    assert.equal(entry.originalLocator.revision, "rev");
+    assert.equal(typeof entry.title, "string");
+    assert.equal(typeof entry.text, "string");
+    assert.equal(Object.hasOwn(entry, "raw"), false);
+    assert.equal(Object.hasOwn(entry, "record"), false);
+  }
 });
 
 test("识别 payload.type 形式的 event_msg", () => {
@@ -78,4 +189,22 @@ test("turn_context 和未知 rollout 外层类型展示 payload，而非空白",
   assert.equal(entries[1].title, "future_record");
   assert.match(entries[1].text, /nested:/);
   assert.match(entries[1].text, /preserve: true/);
+});
+
+test("MCP 文本结果只保留 contentParts 展示投影，不生成重复 text", () => {
+  const record = {
+    type: "event_msg",
+    payload: {
+      type: "mcp_tool_call_end",
+      tool: "synthetic-tool",
+      result: { content: [{ type: "text", text: "# Synthetic result" }, { type: "image", data: "opaque" }] },
+    },
+  };
+  const [entry] = parseRolloutText(JSON.stringify(record));
+
+  assert.equal(entry.kind, "tool-result");
+  assert.deepEqual(entry.contentParts, [{ kind: "markdown", text: "# Synthetic result" }, { kind: "plain", text: '{\n  "type": "image",\n  "data": "opaque"\n}' }]);
+  assert.equal(Object.hasOwn(entry, "text"), false);
+  assert.equal(entry.raw, JSON.stringify(record));
+  assert.deepEqual(entry.record, record);
 });

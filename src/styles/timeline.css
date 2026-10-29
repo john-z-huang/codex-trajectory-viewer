@@ -25,6 +25,85 @@
   padding: 22px 0 17px;
 }
 
+.timeline-toolbar {
+  align-items: flex-start;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.timeline-heading {
+  display: grid;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.timeline-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 1 1 420px;
+  flex-wrap: wrap;
+}
+
+.timeline-navigation button,
+.timeline-jump input,
+.timeline-find input {
+  min-height: 28px;
+  border: 1px solid #dfe2e8;
+  border-radius: 6px;
+  background: #fff;
+  color: #505c77;
+  font: inherit;
+  font-size: 10px;
+}
+
+.timeline-navigation button {
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.timeline-navigation button:disabled {
+  cursor: default;
+  opacity: .5;
+}
+
+.timeline-jump,
+.timeline-find {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.timeline-jump label,
+.timeline-find label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.timeline-jump input {
+  width: 76px;
+  padding: 0 6px;
+}
+
+.timeline-find input {
+  width: min(210px, 34vw);
+  padding: 0 8px;
+}
+
+.timeline-navigation-status {
+  min-width: 78px;
+  color: #777b84;
+  font-size: 10px;
+}
+
 .timeline-label h2 {
   font-size: 12px;
   margin: 0;
@@ -38,6 +117,18 @@
 
 .timeline {
   max-width: 960px;
+}
+
+.virtual-timeline {
+  overflow-anchor: none;
+}
+
+.timeline-virtual-spacer,
+.sidebar-virtual-spacer {
+  display: block;
+  flex: none;
+  width: 100%;
+  pointer-events: none;
 }
 
 .event-card {
@@ -112,6 +203,10 @@
 }
 
 .event-card:last-child .event-rail:after {
+  display: none;
+}
+
+.event-card.is-last .event-rail:after {
   display: none;
 }
 
@@ -211,6 +306,15 @@
   display: none;
 }
 
+.event-copy-source {
+  position: fixed;
+  top: 0;
+  left: -100000px;
+  width: min(960px, 100vw);
+  opacity: 0;
+  pointer-events: none;
+}
+
 @media (max-width: 560px) {
   .event-controls {
     gap: 3px;
@@ -244,6 +348,46 @@
   overflow-wrap: anywhere;
   margin: 11px 0 0;
   color: #33353b;
+}
+
+.event-content-block + .event-content-block {
+  margin-top: 8px;
+}
+
+.event-text-fragment {
+  white-space: pre-wrap;
+}
+
+.event-fragment-note {
+  display: block;
+  margin-top: 10px;
+  color: #858892;
+  font-size: 10px;
+}
+
+.event-fragment-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+  color: #858892;
+  font-size: 10px;
+}
+
+.event-fragment-controls button {
+  border: 1px solid #e0e2e7;
+  border-radius: 5px;
+  background: #fff;
+  color: #59617a;
+  padding: 3px 7px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.event-fragment-controls button:disabled {
+  opacity: .45;
+  cursor: default;
 }
 
 .event-body details {

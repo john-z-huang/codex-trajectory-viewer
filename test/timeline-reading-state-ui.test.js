@@ -1,0 +1,225 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { Window } from "happy-dom";
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
+import { createServer } from "vite";
+
+function makeEntry(lineNumber, revision, text, overrides = {}) {
+  return {
+    lineNumber,
+    timestamp: "2026-10-29T00:00:00Z",
+    kind: "assistant",
+    title: `Synthetic line ${lineNumber}`,
+    text,
+    markdown: true,
+    originalLocator: { revision },
+    ...overrides,
+  };
+}
+
+test("时间线按物理行恢复分页阅读状态，修订时只清原文偏移并支持大行复制与原生下载", async () => {
+  const window = new Window({ url: "http://localhost/" });
+  const original = new Map();
+  const rawRequests = [];
+  const fullMarkdown = `Synthetic long Markdown **bold**\n\n${"Long line content with emoji 😀 and 中文.\n\n".repeat(2200)}`;
+  const downloadedLine = JSON.stringify({
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: fullMarkdown }],
+    },
+  });
+  const fetchSyntheticView = async (input) => {
+    const url = new URL(input, "http://localhost/");
+    const params = url.searchParams;
+    const view = params.get("view");
+    const line = Number(params.get("line"));
+    const offset = Number(params.get("offset") ?? 0);
+    rawRequests.push({ view, line, offset, revision: params.get("revision") });
+    if (view === "raw") {
+      const byteLength = 50_000;
+      const nextOffset = Math.min(offset + 16 * 1024, byteLength);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          revision: params.get("revision"),
+          lineNumber: line,
+          offset,
+          nextOffset,
+          byteLength,
+          done: nextOffset >= byteLength,
+          raw: "r".repeat(nextOffset - offset),
+        }),
+      };
+    }
+    if (view === "download") {
+      return { ok: true, status: 200, text: async () => downloadedLine };
+    }
+    return { ok: false, status: 404, json: async () => ({ error: "Unexpected synthetic request" }) };
+  };
+  const globals = {
+    window,
+    document: window.document,
+    navigator: window.navigator,
+    HTMLElement: window.HTMLElement,
+    Node: window.Node,
+    MouseEvent: window.MouseEvent,
+    Event: window.Event,
+    requestAnimationFrame: window.requestAnimationFrame.bind(window),
+    cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
+    fetch: fetchSyntheticView,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  Object.defineProperty(window.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text) => { window.__clipboardText = text; } },
+  });
+  for (const [key, value] of Object.entries(globals)) {
+    original.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+
+  let vite;
+  let primaryRoot;
+  let secondRoot;
+  try {
+    vite = await createServer({
+      configFile: new URL("../vite.config.js", import.meta.url).pathname,
+      server: { middlewareMode: true },
+      appType: "custom",
+      logLevel: "error",
+    });
+    const { Timeline } = await vite.ssrLoadModule("/src/components/Timeline.jsx");
+    const host = window.document.createElement("div");
+    host.innerHTML = '<section class="session-tab-panel" id="primary"></section><section class="session-tab-panel" id="secondary"></section>';
+    window.document.body.append(host);
+    const primaryPanel = host.querySelector("#primary");
+    const secondaryPanel = host.querySelector("#secondary");
+    for (const panel of [primaryPanel, secondaryPanel]) {
+      Object.defineProperty(panel, "clientHeight", { configurable: true, value: 600 });
+      Object.defineProperty(panel, "scrollHeight", { configurable: true, value: 600 });
+      panel.getBoundingClientRect = () => ({ top: 0, bottom: 600, height: 600, left: 0, right: 960, width: 960 });
+      panel.scrollTo = ({ top }) => { panel.scrollTop = top; };
+    }
+    primaryRoot = createRoot(primaryPanel);
+    secondRoot = createRoot(secondaryPanel);
+
+    const line33Text = `Fragment one.\n\n${"Fragment body **bold** with 中文 and emoji 😀.\n\n".repeat(900)}`;
+    const line33 = makeEntry(33, "revision-1", line33Text);
+    const renderPage = (root, entries, revision, startLine) => root.render(React.createElement(Timeline, {
+      entries,
+      sessionId: "synthetic-session",
+      rollout: { revision, totalLines: 65, pageSize: 32, startLine },
+    }));
+
+    await act(async () => {
+      renderPage(primaryRoot, [line33], "revision-1", 33);
+      renderPage(secondRoot, [line33], "revision-1", 33);
+    });
+    const firstCard = primaryPanel.querySelector(".event-card");
+    const secondCard = secondaryPanel.querySelector(".event-card");
+    const openRaw = async (card) => {
+      await act(async () => {
+        card.querySelector("details summary").click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    };
+    await openRaw(firstCard);
+    await openRaw(secondCard);
+
+    const rawInputs = [...window.document.querySelectorAll(".event-raw-offset input")];
+    const rawInputIds = rawInputs.map((input) => input.id);
+    assert.equal(rawInputs.length, 2);
+    assert.equal(new Set(rawInputIds).size, 2, "raw offset inputs remain unique when the same physical row is open in separate tabs");
+    for (const input of rawInputs) assert.equal(host.querySelector(`label[for="${input.id}"]`)?.htmlFor, input.id);
+
+    await act(async () => {
+      [...firstCard.querySelectorAll(".event-raw-toolbar button")].find((button) => button.textContent === "下一片").click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.deepEqual(rawRequests.filter((request) => request.view === "raw" && request.line === 33).map(({ offset }) => offset), [0, 0, 16_384]);
+    assert.match(firstCard.querySelector(".event-fragment-controls")?.textContent ?? "", /第 1 \/ \d+ 段/);
+    await act(async () => firstCard.querySelector(".event-fragment-controls button:last-child").click());
+    assert.match(firstCard.querySelector(".event-fragment-controls")?.textContent ?? "", /第 2 \/ \d+ 段/);
+
+    await act(async () => firstCard.querySelector('[aria-label="收起第 33 行 JSONL 对象"]').click());
+    assert.ok(firstCard.querySelector(".event-body").classList.contains("collapsed"));
+    const line65Oversized = makeEntry(65, "revision-1", undefined, {
+      kind: "oversized",
+      title: "超大记录…",
+      titleTruncated: true,
+      projectionLimited: true,
+    });
+    await act(async () => renderPage(primaryRoot, [line65Oversized], "revision-1", 65));
+    const oversizedCard = primaryPanel.querySelector(".event-card");
+    assert.match(oversizedCard.querySelector(".event-title")?.getAttribute("title") ?? "", /预览已省略/);
+    await openRaw(oversizedCard);
+    const rawDownload = oversizedCard.querySelector('.event-raw-toolbar a[download]');
+    assert.equal(rawDownload?.download, "rollout-line-65.txt");
+    assert.match(rawDownload?.getAttribute("href") ?? "", /view=download.*line=65/);
+    assert.match(oversizedCard.querySelector(".event-raw-download-note")?.textContent ?? "", /版本变化时，请刷新后重试/);
+    const nativeDownloadClick = new window.MouseEvent("click", { bubbles: true, cancelable: true });
+    rawDownload.dispatchEvent(nativeDownloadClick);
+    assert.equal(nativeDownloadClick.defaultPrevented, false, "the native download link is not intercepted to create a JavaScript Blob");
+    assert.equal(rawRequests.some((request) => request.view === "download"), false);
+
+    await act(async () => {
+      oversizedCard.querySelector('[aria-label="复制对话"]').click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const copied = window.__clipboardText ?? "";
+    assert.ok(copied.length > 70_000, `the full non-first physical line is copied (received ${copied.length} characters)`);
+    assert.match(copied, /Synthetic long Markdown bold/);
+    assert.match(copied, /emoji 😀 and 中文/);
+    assert.doesNotMatch(copied, /\*\*/);
+    assert.equal(oversizedCard.querySelector(".event-copy-status")?.textContent, "已复制");
+    assert.equal(rawRequests.filter((request) => request.view === "download").length, 1, "full line download occurs only for explicit copy");
+
+    await act(async () => renderPage(primaryRoot, [line33], "revision-1", 33));
+    let restoredCard = primaryPanel.querySelector(".event-card");
+    assert.ok(restoredCard.querySelector(".event-body").classList.contains("collapsed"), "collapse state is keyed by stable physical line across pages");
+    await act(async () => restoredCard.querySelector('[aria-label="展开第 33 行 JSONL 对象"]').click());
+    assert.match(restoredCard.querySelector(".event-fragment-controls")?.textContent ?? "", /第 2 \/ \d+ 段/, "body fragment page is retained while the row is off-page");
+    await openRaw(restoredCard);
+    assert.equal(rawRequests.filter((request) => request.view === "raw" && request.line === 33).at(-1)?.offset, 16_384, "raw byte offset is restored when the physical line returns to the page");
+    assert.equal([...restoredCard.querySelectorAll(".event-raw-toolbar button")].find((button) => button.textContent === "上一片")?.disabled, false);
+
+    await act(async () => {
+      [...restoredCard.querySelectorAll(".event-raw-toolbar button")].find((button) => button.textContent === "上一片").click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(rawRequests.filter((request) => request.view === "raw" && request.line === 33).at(-1)?.offset, 0, "the offset history navigates back to the earlier chunk");
+    await act(async () => {
+      [...restoredCard.querySelectorAll(".event-raw-toolbar button")].find((button) => button.textContent === "下一片").click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(rawRequests.filter((request) => request.view === "raw" && request.line === 33).at(-1)?.offset, 16_384);
+    await act(async () => restoredCard.querySelector('[aria-label="收起第 33 行 JSONL 对象"]').click());
+
+    const line33Revision2 = makeEntry(33, "revision-2", line33Text);
+    await act(async () => {
+      renderPage(primaryRoot, [line33Revision2], "revision-2", 33);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    restoredCard = primaryPanel.querySelector(".event-card");
+    assert.ok(restoredCard.querySelector(".event-body").classList.contains("collapsed"), "collapse state survives a file revision change");
+    await act(async () => restoredCard.querySelector('[aria-label="展开第 33 行 JSONL 对象"]').click());
+    assert.match(restoredCard.querySelector(".event-fragment-controls")?.textContent ?? "", /第 2 \/ \d+ 段/, "body fragment page survives a file revision change");
+    await openRaw(restoredCard);
+    assert.equal(rawRequests.filter((request) => request.view === "raw" && request.line === 33).at(-1)?.offset, 0, "a raw offset from the previous revision is never sent to the new content");
+    assert.equal(rawRequests.filter((request) => request.view === "raw" && request.line === 33 && request.revision === "revision-2").at(-1)?.offset, 0);
+    assert.equal([...restoredCard.querySelectorAll(".event-raw-toolbar button")].find((button) => button.textContent === "上一片")?.disabled, true, "revision change clears raw offset history");
+  } finally {
+    if (primaryRoot) await act(async () => primaryRoot.unmount());
+    if (secondRoot) await act(async () => secondRoot.unmount());
+    if (vite) await vite.close();
+    window.happyDOM.abort();
+    for (const [key, descriptor] of original) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  }
+});

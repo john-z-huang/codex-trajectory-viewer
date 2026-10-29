@@ -23,8 +23,9 @@
 src/
   main.jsx                     浏览器入口与根组件挂载
   components/
-    SessionViewer.jsx          会话列表状态、搜索、刷新与页面组合
-    SessionSidebar.jsx          项目分组和会话侧栏
+    SessionViewer.jsx          会话数据、刷新、标签状态与页面组合
+    SessionSidebar.jsx         侧栏外壳、品牌和本机读取提示
+    SessionSearch.jsx          会话搜索状态、项目分组、虚拟列表和键盘导航
     SessionWorkspace.jsx       工作区、会话标签和持续挂载的标签面板
     SessionPanel.jsx            单个标签的详情加载状态与详情视图连接
     SessionDetail.jsx           会话元数据、子代理、时间线和 SQLite 补充区
