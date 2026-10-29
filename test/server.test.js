@@ -238,3 +238,33 @@ test("在父会话中关联并读取子代理 rollout，缺失与冲突记录显
   assert.equal((await fetch(`${base}/api/sessions/${encodeURIComponent(Buffer.from("../../outside/secret.jsonl").toString("base64url"))}`)).status, 404);
   for (const [file, hash] of originalHashes) assert.equal(createHash("sha256").update(await readFile(file)).digest("hex"), hash);
 });
+
+test("SQLite 历史绑定窗口版本，WAL 中的新内容必须显式刷新才能加载", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-manual-refresh-'));
+  await mkdir(path.join(home, 'sessions'));
+  await writeFile(path.join(home, 'sessions', 'synthetic.jsonl'), JSON.stringify({ type: 'session_meta', payload: { id: 'synthetic-thread' } }) + '\n');
+  const file = path.join(home, 'thread_history_1.sqlite');
+  const writer = new DatabaseSync(file);
+  writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT); INSERT INTO thread_turns VALUES ('synthetic-thread', 'old');");
+  const app = createAppServer({ home });
+  await new Promise((resolve) => app.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { await new Promise((resolve) => app.close(resolve)); writer.close(); await rm(home, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${app.address().port}`;
+  const [session] = await (await fetch(`${base}/api/sessions`)).json();
+  const endpoint = `${base}/api/sessions/${session.id}`;
+  const initial = await (await fetch(`${endpoint}?view=window`)).json();
+  assert.match(initial.supplementRevision, /^[a-f0-9]{64}$/);
+  const historyUrl = `${endpoint}?view=history&historyPage=1&supplementRevision=${initial.supplementRevision}`;
+  assert.equal((await fetch(historyUrl)).status, 200);
+  writer.exec("INSERT INTO thread_turns VALUES ('synthetic-thread', 'new');");
+  const before = await readFile(file);
+  const walBefore = await readFile(`${file}-wal`);
+  const rejected = await fetch(historyUrl);
+  assert.equal(rejected.status, 409);
+  assert.equal((await rejected.json()).code, 'stale_revision');
+  const refreshed = await (await fetch(`${endpoint}?view=window`)).json();
+  assert.notEqual(refreshed.supplementRevision, initial.supplementRevision);
+  assert.equal((await fetch(`${endpoint}?view=history&supplementRevision=${refreshed.supplementRevision}`)).status, 200);
+  assert.deepEqual(await readFile(file), before);
+  assert.deepEqual(await readFile(`${file}-wal`), walBefore, 'viewer does not write the synthetic WAL');
+});

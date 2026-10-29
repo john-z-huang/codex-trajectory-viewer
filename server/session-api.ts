@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { RolloutReaderError, type RolloutReaderStore } from "./rollout-reader.js";
-import { readSessionSupplement, readThreadSummaries } from "./sqlite-reader.js";
+import { readSessionSupplement, readSupplementRevision, readThreadSummaries } from "./sqlite-reader.js";
 import { linkSubagents, subagentActivityFromRollout } from "./subagents.js";
 import { discoverSessions, mergeThreadSummary } from "./session-discovery.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -206,7 +206,17 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
     : 1;
   const view = url.searchParams.get("view");
   if (view === "history") {
+    const expected = url.searchParams.get("supplementRevision");
+    const before = await readSupplementRevision(sqliteHome);
+    if (expected !== null && expected !== before) {
+      sendJson(response, 409, { code: "stale_revision", error: "SQLite 数据已变化，请点击「刷新」加载新内容。" });
+      return true;
+    }
     const supplement = await readSessionSupplement(sqliteHome, match, { historyPage });
+    if (expected !== null && await readSupplementRevision(sqliteHome) !== before) {
+      sendJson(response, 409, { code: "stale_revision", error: "SQLite 数据已变化，请点击「刷新」加载新内容。" });
+      return true;
+    }
     sendJson(response, 200, { supplement });
     return true;
   }
@@ -226,6 +236,7 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
           sendJson(response, 400, { error: "line must be a positive safe integer", code: "invalid_line" });
           return true;
         }
+        const supplementRevision = await readSupplementRevision(sqliteHome);
         const [window, threads, supplement] = await Promise.all([
           reader.readWindow(match._path, line, cancellation.signal),
           readThreadSummaries(sqliteHome, [match]),
@@ -233,9 +244,14 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
         ]);
         const activities = window.activities;
         const subagents = await buildSubagentProjection(match, sessions, activities, sqliteHome);
+        if (await readSupplementRevision(sqliteHome) !== supplementRevision) {
+          sendJson(response, 409, { code: "stale_revision", error: "SQLite 数据在读取时发生变化，请点击「刷新」重试。" });
+          return true;
+        }
         sendJson(response, 200, {
           ...mergeThreadSummary(match, threads.get(String(match.sessionId))),
           supplement,
+          supplementRevision,
           subagents,
           rollout: withRolloutWarnings(window.rollout),
           lines: window.lines,

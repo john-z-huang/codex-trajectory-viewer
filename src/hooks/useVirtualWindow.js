@@ -47,6 +47,7 @@ export function useVirtualWindow({
   const nodesRef = useRef(new Map());
   const observerRef = useRef(null);
   const anchorRef = useRef(null);
+  const pendingMeasurementRef = useRef(null);
   const previousKeysRef = useRef(itemKeys);
   const [range, setRange] = useState(() => calculateVirtualRange(layoutRef.current, {
     scrollTop: 0,
@@ -95,7 +96,7 @@ export function useVirtualWindow({
     observerRef.current?.observe(node);
   }, []);
 
-  const preserveAnchorAfterMeasurements = useCallback((beforeScrollTop, anchor) => {
+  const preserveAnchorAfterMeasurements = useCallback((anchor) => {
     if (!anchor) return;
     const layout = layoutRef.current;
     let index = anchor.index;
@@ -103,11 +104,22 @@ export function useVirtualWindow({
     if (index < 0) return;
     const nextScrollTop = layout.offsetForIndex(index) + anchor.offsetWithinItem;
     const scrollElement = getScrollElement?.();
-    if (scrollElement && Math.abs(nextScrollTop - beforeScrollTop) >= 0.5) {
-      scrollElement.scrollTop += nextScrollTop - beforeScrollTop;
+    const currentScrollTop = readMetrics().scrollTop;
+    if (scrollElement && Math.abs(nextScrollTop - currentScrollTop) >= 0.5) {
+      scrollElement.scrollTop += nextScrollTop - currentScrollTop;
     }
     anchorRef.current = { key: anchor.key, index, offsetWithinItem: anchor.offsetWithinItem };
-  }, [getScrollElement, itemKeys]);
+  }, [getScrollElement, itemKeys, readMetrics]);
+
+  // Spacer heights must reach the DOM before scrollTop is changed. Otherwise
+  // a browser near the bottom clamps the correction against the old height.
+  useLayoutEffect(() => {
+    const pending = pendingMeasurementRef.current;
+    pendingMeasurementRef.current = null;
+    if (!enabled || !pending) return;
+    preserveAnchorAfterMeasurements(pending.anchor);
+    refreshWindow();
+  }, [enabled, range, preserveAnchorAfterMeasurements, refreshWindow]);
 
   useLayoutEffect(() => {
     if (previousKeysRef.current === itemKeys) return;
@@ -166,8 +178,15 @@ export function useVirtualWindow({
         }
       }
 
-      if (changed) preserveAnchorAfterMeasurements(metrics.scrollTop, anchor);
-      refreshWindow(readMetrics().scrollTop, readMetrics().viewportHeight);
+      if (changed) {
+        const pending = pendingMeasurementRef.current ?? { anchor };
+        pendingMeasurementRef.current = pending;
+        const index = pending.anchor ? layout.indexOfKey(pending.anchor.key) : -1;
+        const target = index >= 0 ? layout.offsetForIndex(index) + pending.anchor.offsetWithinItem : metrics.scrollTop;
+        refreshWindow(target, metrics.viewportHeight);
+      } else {
+        refreshWindow(metrics.scrollTop, metrics.viewportHeight);
+      }
     }
 
     const Observer = globalThis.ResizeObserver;

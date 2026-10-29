@@ -245,7 +245,7 @@ export function Timeline({
       pendingFocusRef.current = null;
       const card = [...(timelineRef.current?.querySelectorAll(".event-card") ?? [])]
         .find((candidate) => Number(candidate.dataset.lineNumber) === pending.lineNumber);
-      card?.focus();
+      card?.focus({ preventScroll: true });
       return;
     }
 
@@ -258,7 +258,9 @@ export function Timeline({
     const index = Math.max(virtualWindow.range.start, Math.min(virtualWindow.range.end - 1, focused.index));
     const card = [...(timelineRef.current?.querySelectorAll(".event-card") ?? [])]
       .find((candidate) => Number(candidate.dataset.entryIndex) === index);
-    card?.focus();
+    // The replacement can be an overscan card above the viewport. Restoring
+    // keyboard focus must not undo a user's scroll to the next records.
+    card?.focus({ preventScroll: true });
     if (card) focusedEntryRef.current = { lineNumber: Number(card.dataset.lineNumber), index };
   }, [focusRequest, entries, virtualWindow.range.start, virtualWindow.range.end]);
 

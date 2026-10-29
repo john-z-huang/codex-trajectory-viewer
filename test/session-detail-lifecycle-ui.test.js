@@ -364,3 +364,52 @@ test("unmount aborts a pending history request", async () => {
     await ui.cleanup();
   }
 });
+
+test("版本冲突保留已加载页，分页、搜索和原文回调均不隐式刷新", async () => {
+  const ui = await setup();
+  const calls = [];
+  let value;
+  let version = 0;
+  const refreshBody = deferred();
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('view=window')) {
+      if (version) return { ok: true, json: () => refreshBody.promise };
+      const initial = syntheticWindow('old visible content', [{ page: 1 }]);
+      initial.supplementRevision = 'sqlite-old';
+      initial.rollout.totalLines = 64;
+      return { ok: true, json: async () => initial };
+    }
+    return { ok: false, status: 409, json: async () => ({ code: 'stale_revision', error: '数据已变化，请点击「刷新」' }) };
+  };
+  function Harness() {
+    value = ui.useSessionDetail('synthetic-session', version);
+    return React.createElement('output', null, value.entries[0]?.text);
+  }
+  try {
+    await act(async () => ui.root.render(React.createElement(Harness)));
+    const oldEntries = value.entries;
+    const oldDetail = value.detail;
+    await act(async () => { assert.equal(await value.loadLine(33), false); });
+    assert.strictEqual(value.entries, oldEntries);
+    assert.strictEqual(value.detail, oldDetail);
+    assert.equal(value.currentLine, 1);
+    assert.match(value.error, /刷新/);
+    await act(async () => { assert.equal(await value.searchNext('new text', 0), undefined); });
+    await act(async () => { await value.recoverStaleRevision(1, 'old'); });
+    await act(async () => { await value.loadHistoryPage(2); });
+    assert.match(calls.at(-1), /supplementRevision=sqlite-old/);
+    assert.strictEqual(value.detail, oldDetail);
+    assert.strictEqual(value.entries, oldEntries);
+    assert.equal(calls.filter((url) => url.includes('view=window')).length, 1);
+    assert.equal(calls.filter((url) => url.includes('view=search')).length, 1);
+    version += 1;
+    await act(async () => ui.root.render(React.createElement(Harness)));
+    assert.strictEqual(value.entries, oldEntries, 'manual refresh keeps the visible page while pending');
+    refreshBody.resolve({ ...syntheticWindow('manually refreshed content'), rollout: { ...syntheticWindow('').rollout, revision: 'new-revision' } });
+    await act(async () => Promise.resolve());
+    assert.match(ui.container.textContent, /manually refreshed content/);
+    assert.equal(value.error, '');
+    assert.equal(calls.filter((url) => url.includes('view=window')).length, 2);
+  } finally { await ui.cleanup(); }
+});
