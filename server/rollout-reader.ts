@@ -81,6 +81,8 @@ interface LineSpan {
 
 interface RolloutIndex {
   filePath: string;
+  identity: string;
+  digest: string;
   revision: string;
   totalLines: number;
   totalBytes: number;
@@ -100,6 +102,7 @@ interface OpenedFile {
   revision: string;
   size: number;
   identity: string;
+  digest?: string;
 }
 
 interface BuildWaiter {
@@ -146,8 +149,23 @@ function sameStatIdentity(left: string, right: string): boolean {
   return left === right;
 }
 
-function makeRevision(identity: string): string {
-  return createHash("sha256").update(identity).digest("hex");
+function makeRevision(identity: string, digest: string): string {
+  return `${Buffer.from(identity).toString("base64url")}.${digest}`;
+}
+
+function applyRevision(opened: OpenedFile, revision: string): void {
+  if (revision.length > 256) throw staleRevision();
+  const [encoded, digest, extra] = revision.split(".");
+  const identity = Buffer.from(encoded ?? "", "base64url").toString();
+  if (extra !== undefined || !/^\d+:\d+:\d+:-?\d+:-?\d+$/.test(identity) || !/^[a-f0-9]{64}$/.test(digest ?? "")) throw staleRevision();
+  const [dev, ino, bytes] = identity.split(":");
+  const current = opened.identity.split(":");
+  const size = Number(bytes);
+  if (dev !== current[0] || ino !== current[1] || !Number.isSafeInteger(size) || size > opened.size) throw staleRevision();
+  opened.size = size;
+  opened.identity = identity;
+  opened.digest = digest;
+  opened.revision = revision;
 }
 
 function isWithinRoot(rootPath: string, filePath: string): boolean {
@@ -361,11 +379,12 @@ export class RolloutReaderStore {
   async *streamLine(filePath: string, revision: string, lineNumber: number, signal?: AbortSignal): AsyncGenerator<Buffer> {
     const opened = await this.openFile(filePath);
     try {
+      applyRevision(opened, revision);
       const index = await this.getIndex(opened, signal);
       if (index.revision !== revision) throw staleRevision();
       const span = await this.lineSpan(opened, index, lineNumber, signal);
       if (!span) throw new RolloutReaderError(404, "line_not_found", "指定的轨迹行不存在。");
-      await this.assertStable(opened);
+      await this.assertStable(opened, signal);
       let position = span.startOffset;
       let remaining = span.byteLength;
       while (remaining > 0) {
@@ -377,7 +396,7 @@ export class RolloutReaderStore {
         remaining -= buffer.length;
         yield buffer;
       }
-      await this.assertStable(opened);
+      await this.assertStable(opened, signal);
     } catch (error) {
       throw asReadError(error);
     } finally {
@@ -395,11 +414,11 @@ export class RolloutReaderStore {
     try {
       throwIfAborted(signal);
       opened = await this.openFile(filePath);
-      if (expectedRevision && opened.revision !== expectedRevision) throw staleRevision();
+      if (expectedRevision) applyRevision(opened, expectedRevision);
       const index = await this.getIndex(opened, signal);
       if (expectedRevision && index.revision !== expectedRevision) throw staleRevision();
       const value = await work(opened, index);
-      await this.assertStable(opened);
+      await this.assertStable(opened, signal);
       return value;
     } catch (error) {
       throw asReadError(error);
@@ -420,8 +439,7 @@ export class RolloutReaderStore {
       const fdInfo = await handle.stat({ bigint: true });
       if (!fdInfo.isFile()) throw notFound();
       const identity = statIdentity(fdInfo);
-      const pathIdentity = statIdentity(pathInfo);
-      if (!sameStatIdentity(identity, pathIdentity)) throw staleRevision();
+      if (fdInfo.dev !== pathInfo.dev || fdInfo.ino !== pathInfo.ino) throw staleRevision();
       const size = Number(fdInfo.size);
       if (!Number.isSafeInteger(size) || fdInfo.size > MAX_FILE_SIZE) {
         throw new RolloutReaderError(413, "file_too_large", "会话轨迹超过安全读取范围。");
@@ -430,11 +448,10 @@ export class RolloutReaderStore {
         handle,
         filePath: canonical,
         rootPath,
-        revision: makeRevision(identity),
+        revision: "",
         size,
         identity,
       };
-      await this.assertStable(opened);
       return opened;
     } catch (error) {
       await handle?.close().catch(() => {});
@@ -442,8 +459,9 @@ export class RolloutReaderStore {
     }
   }
 
-  private async assertStable(opened: OpenedFile): Promise<void> {
+  private async assertStable(opened: OpenedFile, signal?: AbortSignal): Promise<void> {
     try {
+      throwIfAborted(signal);
       const rootNow = await realpath(this.home);
       const resolvedNow = await realpath(opened.filePath);
       if (rootNow !== opened.rootPath || !isWithinRoot(rootNow, resolvedNow)) throw staleRevision();
@@ -453,10 +471,29 @@ export class RolloutReaderStore {
       ]);
       const fdIdentity = statIdentity(fdInfo);
       const pathIdentity = statIdentity(pathInfo);
-      if (!fdInfo.isFile() || !pathInfo.isFile()
-        || !sameStatIdentity(fdIdentity, opened.identity)
-        || !sameStatIdentity(pathIdentity, opened.identity)) throw staleRevision();
+      const [dev, ino] = opened.identity.split(":");
+      const sameFile = (info: typeof fdInfo) => info.isFile()
+        && String(info.dev) === dev && String(info.ino) === ino && info.size >= BigInt(opened.size);
+      if (!sameFile(fdInfo) || !sameFile(pathInfo)) throw staleRevision();
+      if (sameStatIdentity(fdIdentity, opened.identity) && sameStatIdentity(pathIdentity, opened.identity)) return;
+      // Appends may continue during validation. Only the original prefix is
+      // hashed and consumed; a completed partial last line remains a snapshot.
+      if (!opened.digest) throw staleRevision();
+      const hash = createHash("sha256");
+      const block = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+      let offset = 0;
+      while (offset < opened.size) {
+        throwIfAborted(signal);
+        const { bytesRead } = await opened.handle.read(block, 0, Math.min(block.length, opened.size - offset), offset);
+        if (!bytesRead) throw staleRevision();
+        hash.update(block.subarray(0, bytesRead));
+        offset += bytesRead;
+      }
+      if (hash.digest("hex") !== opened.digest) throw staleRevision();
+      const [fdAfter, pathAfter] = await Promise.all([opened.handle.stat({ bigint: true }), stat(resolvedNow, { bigint: true })]);
+      if (!sameFile(fdAfter) || !sameFile(pathAfter)) throw staleRevision();
     } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
       if (error instanceof RolloutReaderError) throw error;
       throw staleRevision();
     }
@@ -464,9 +501,16 @@ export class RolloutReaderStore {
 
   private async getIndex(opened: OpenedFile, signal?: AbortSignal): Promise<RolloutIndex> {
     const cached = this.cache.get(opened.filePath);
-    if (cached?.revision === opened.revision) {
-      this.cache.delete(opened.filePath);
-      this.cache.set(opened.filePath, cached);
+    if (cached?.identity === opened.identity && (!opened.digest || cached.digest === opened.digest)) {
+      opened.digest = cached.digest;
+      opened.revision = cached.revision;
+      await this.assertStable(opened, signal);
+      // Validation yields to other requests, which may have cached a newer
+      // window. Touch LRU order only while this entry is still the owner.
+      if (this.cache.get(opened.filePath) === cached) {
+        this.cache.delete(opened.filePath);
+        this.cache.set(opened.filePath, cached);
+      }
       return cached;
     }
     if (cached) this.removeCacheEntry(opened.filePath, cached);
@@ -475,7 +519,7 @@ export class RolloutReaderStore {
       this.buildCount += 1;
       return this.buildIndex(opened, signal);
     });
-    await this.assertStable(opened);
+    await this.assertStable(opened, signal);
     this.insertCacheEntry(opened.filePath, index);
     return index;
   }
@@ -483,6 +527,8 @@ export class RolloutReaderStore {
   private async buildIndex(opened: OpenedFile, signal?: AbortSignal): Promise<RolloutIndex> {
     const index: RolloutIndex = {
       filePath: opened.filePath,
+      identity: opened.identity,
+      digest: "",
       revision: opened.revision,
       totalLines: 0,
       totalBytes: opened.size,
@@ -502,6 +548,7 @@ export class RolloutReaderStore {
     let lineTooLong = false;
     let position = 0;
     const block = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+    const hash = createHash("sha256");
 
     const append = (chunk: Buffer) => {
       if (!chunk.length) return;
@@ -536,6 +583,7 @@ export class RolloutReaderStore {
       const requested = Math.min(block.length, opened.size - position);
       const { bytesRead } = await opened.handle.read(block, 0, requested, position);
       if (bytesRead === 0) throw staleRevision();
+      hash.update(block.subarray(0, bytesRead));
       let cursor = 0;
       while (cursor < bytesRead) {
         const newline = block.indexOf(0x0a, cursor);
@@ -551,8 +599,12 @@ export class RolloutReaderStore {
     }
 
     if (lineLength > 0) finishLine(false);
+    index.digest = hash.digest("hex");
+    if (opened.digest && opened.digest !== index.digest) throw staleRevision();
+    opened.digest = index.digest;
+    index.revision = opened.revision = makeRevision(opened.identity, index.digest);
     index.logicalBytes = this.indexLogicalBytes(index);
-    await this.assertStable(opened);
+    await this.assertStable(opened, signal);
     return index;
   }
 
@@ -587,7 +639,8 @@ export class RolloutReaderStore {
   }
 
   private indexLogicalBytes(index: RolloutIndex): number {
-    return index.checkpoints.length * CHECKPOINT_LOGICAL_BYTES
+    return Buffer.byteLength(index.identity) + Buffer.byteLength(index.revision) + Buffer.byteLength(index.digest)
+      + index.checkpoints.length * CHECKPOINT_LOGICAL_BYTES
       + index.spans.size * LINE_SPAN_LOGICAL_BYTES
       + index.activityBytes;
   }

@@ -159,14 +159,16 @@ test("1 MiB and 10 MiB UTF-8 lines round-trip through bounded chunks and streame
   }
 });
 
-test("revision changes reject stale pages and a fresh window clamps the saved anchor", async (t) => {
+test("append keeps the original window readable; refresh includes new lines and historical changes still fail", async (t) => {
   const { home, directory } = await createRolloutHome(t);
   const file = path.join(directory, "mutable.jsonl");
   await writeFile(file, "one\ntwo\nthree\n");
   const reader = new RolloutReaderStore(home);
   const first = await reader.readWindow(file, 2);
-  await writeFile(file, "one\ntwo\nthree\nfour\n");
-  await assert.rejects(reader.readPage(file, first.rollout.revision, 2), (error) => error.status === 409);
+  await appendFile(file, "four\n");
+  const oldPage = await reader.readPage(file, first.rollout.revision, 2);
+  assert.equal(oldPage.rollout.totalLines, 3);
+  assert.deepEqual(oldPage.lines.map((line) => line.raw), ["one", "two", "three"]);
   const afterAppend = await reader.readWindow(file, 999);
   assert.equal(afterAppend.rollout.totalLines, 4);
   assert.equal(afterAppend.rollout.startLine, 1);
@@ -188,7 +190,7 @@ test("revision changes reject stale pages and a fresh window clamps the saved an
   await assert.rejects(reader.readPage(file, beforeTruncate, 1), (error) => error.status === 409);
 });
 
-test("a file change during streamed line output fails the stream after its first bounded chunk", async (t) => {
+test("a historical rewrite during streamed line output fails after its first bounded chunk", async (t) => {
   const { home, directory } = await createRolloutHome(t);
   const file = path.join(directory, "stream-mutation.jsonl");
   await writeFile(file, "x".repeat(512 * 1024));
@@ -198,10 +200,52 @@ test("a file change during streamed line output fails the stream after its first
   const first = await iterator.next();
   assert.equal(first.done, false);
   assert.equal(first.value.length, 64 * 1024);
-  await appendFile(file, "changed");
+  await writeFile(file, "y".repeat(512 * 1024));
   await assert.rejects(async () => {
     while (!(await iterator.next()).done) {}
   }, (error) => error.status === 409);
+});
+
+test("append-safe versions bound pages, search, raw chunks and streams even after index eviction", async (t) => {
+  const { home, directory } = await createRolloutHome(t);
+  const file = path.join(directory, "append-safe.jsonl");
+  const tail = "尾".repeat(30_000);
+  const original = Array.from({ length: 70 }, (_, i) => `old-${i + 1}`).join("\n") + "\n" + tail;
+  await writeFile(file, original);
+  const reader = new RolloutReaderStore(home);
+  const initial = await reader.readWindow(file, 1);
+  const revision = initial.rollout.revision;
+  await appendFile(file, "tail-completed\nnew-only\n");
+  const before = await readFile(file);
+  // Reconstruct an evicted index from the self-contained version, with the
+  // unterminated last line still ending at its original byte boundary.
+  const freshReader = new RolloutReaderStore(home);
+  const page = await freshReader.readPage(file, revision, 65);
+  assert.equal(page.rollout.totalLines, 71);
+  assert.equal(page.lines.at(-1).byteLength, Buffer.byteLength(tail));
+  assert.equal((await freshReader.search(file, revision, "old-65", 0)).lineNumber, 65);
+  assert.equal((await freshReader.search(file, revision, "new-only", 0)).lineNumber, null);
+  let raw = "";
+  let offset = 0;
+  while (true) {
+    const chunk = await freshReader.readRawChunk(file, revision, 71, offset);
+    raw += chunk.raw;
+    if (chunk.done) break;
+    offset = chunk.nextOffset;
+  }
+  assert.equal(raw, tail);
+  assert.deepEqual(await readFile(file), before, "page, search and raw reads leave the synthetic rollout unchanged");
+  const streamed = [];
+  for await (const chunk of freshReader.streamLine(file, revision, 71)) {
+    streamed.push(chunk);
+    await appendFile(file, "more-appended\n");
+  }
+  assert.equal(Buffer.concat(streamed).toString(), tail);
+  assert.equal((await freshReader.readWindow(file, 999)).lines.at(-1).raw, "more-appended");
+  assert.equal((await freshReader.readPage(file, revision, 33)).lines[0].raw, "old-33");
+  assert.ok((await readFile(file)).subarray(0, before.length).equals(before));
+  await writeFile(file, original.replace("old-1", "OLD-1") + "appended-again\n");
+  await assert.rejects(freshReader.readPage(file, revision, 33), (error) => error.status === 409);
 });
 
 test("literal search spans read blocks but never crosses a physical line", async (t) => {
@@ -334,8 +378,15 @@ test("session window, page, raw, search, and download views stay bounded and use
   const invalidLine = await fetch(`${base}/api/sessions/${session.id}?view=page&revision=${encodeURIComponent(window.rollout.revision)}&line=0`);
   assert.equal(invalidLine.status, 400);
   await appendFile(sessionPath, "synthetic appended row\n");
-  const stalePage = await fetch(`${base}/api/sessions/${session.id}?view=page&revision=${encodeURIComponent(window.rollout.revision)}&line=1`);
-  assert.equal(stalePage.status, 409);
+  const oldPage = await fetch(`${base}/api/sessions/${session.id}?view=page&revision=${encodeURIComponent(window.rollout.revision)}&line=1`);
+  assert.equal(oldPage.status, 200);
+  assert.equal((await oldPage.json()).rollout.totalLines, lines.length);
+  const oldSearch = await fetch(`${base}/api/sessions/${session.id}?view=search&revision=${encodeURIComponent(window.rollout.revision)}&q=appended&afterLine=0`);
+  assert.equal((await oldSearch.json()).lineNumber, null);
+  const oldRaw = await fetch(`${base}/api/sessions/${session.id}?view=raw&revision=${encodeURIComponent(window.rollout.revision)}&line=${lastLine}`);
+  assert.equal((await oldRaw.json()).raw, lines.at(-1));
+  const oldDownload = await fetch(`${base}/api/sessions/${session.id}?view=download&revision=${encodeURIComponent(window.rollout.revision)}&line=${lastLine}`);
+  assert.equal(await oldDownload.text(), lines.at(-1));
   const refreshed = await fetch(`${base}/api/sessions/${session.id}?view=window&line=999`);
   const refreshedWindow = await refreshed.json();
   assert.equal(refreshedWindow.rollout.totalLines, lines.length + 1);

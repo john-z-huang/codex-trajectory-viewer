@@ -315,7 +315,13 @@ export function useSessionDetail(sessionId, refreshVersion, {
     try {
       const value = await task.promise;
       if (!isCurrent() || value === STALE_SESSION_RESPONSE) return;
-      setDetail((current) => isCurrent() && current ? { ...current, supplement: value.supplement } : current);
+      setDetail((current) => {
+        if (!isCurrent() || !current) return current;
+        const supplement = value.historyOnly
+          ? current.supplement.map((source) => value.supplement.find((next) => next.database === source.database) ?? source)
+          : value.supplement;
+        return { ...current, supplement };
+      });
       setError("");
     } catch (reason) {
       if (isCurrent() && reason?.name !== "AbortError") {
