@@ -329,7 +329,9 @@ export function useSessionDetail(sessionId, refreshVersion, {
     } finally {
       if (isCurrent()) {
         setHistoryLoading(false);
-        historyRequestRef.current = null;
+        // React 可能在 finally 之后才执行详情 updater；保留已完成的 token，
+        // 由下次请求或清理使其失效，避免把当前成功响应误判为迟到响应。
+        historyRequestRef.current = { token };
       }
     }
   }, [detail, sessionId]);
