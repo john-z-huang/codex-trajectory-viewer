@@ -46,7 +46,7 @@ test("SessionPanel 切换 JSONL / SQLite 保留两侧状态，history 翻页不�
     tables: [{
       table: "thread_items",
       rows: [sqliteRow("item-page-1", "first SQLite history page")],
-      pagination: { page: 1, totalRows: 2, hasMore: true },
+      pagination: { page: 1, pageSize: 1, totalRows: 2, hasMore: true },
     }],
   }];
   const nextSupplement = [{
@@ -55,7 +55,7 @@ test("SessionPanel 切换 JSONL / SQLite 保留两侧状态，history 翻页不�
     tables: [{
       table: "thread_items",
       rows: [sqliteRow("item-page-2", "second SQLite history page")],
-      pagination: { page: 2, totalRows: 2, hasMore: false },
+      pagination: { page: 2, pageSize: 1, totalRows: 2, hasMore: false },
     }],
   }];
   initialSupplement.push({
@@ -148,7 +148,7 @@ test("SessionPanel 切换 JSONL / SQLite 保留两侧状态，history 翻页不�
       await new Promise((resolve) => setImmediate(resolve));
     });
     assert.equal(calls.filter(({ view }) => view === "window").length, 1);
-    assert.equal(host.querySelectorAll(".event-card").length, 1);
+    assert.equal(host.querySelector(".session-source-panel").querySelectorAll(".event-card").length, 1);
 
     const firstCard = host.querySelector(".event-card");
     await act(async () => firstCard.querySelector('[aria-label="收起第 1 行 JSONL 对象"]').click());
@@ -168,20 +168,18 @@ test("SessionPanel 切换 JSONL / SQLite 保留两侧状态，history 翻页不�
     const sourceTabs = [...host.querySelectorAll('[role="tab"]')];
     await act(async () => sourceTabs[1].click());
     assert.equal(host.scrollTop, 0);
-    const sqliteTable = () => host.querySelector("details.sqlite-table");
-    await act(async () => sqliteTable().querySelector("summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    const sqliteTable = () => host.querySelector(".sqlite-conversation");
     assert.match(sqliteTable().textContent, /first SQLite history page/);
-    await act(async () => sqliteTable().querySelector('.history-pager button:last-child').click());
+    await act(async () => sqliteTable().querySelector('[aria-label="下一页"]').click());
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
     assert.equal(calls.filter(({ view }) => view === "history").length, 1);
     const historyCall = calls.find(({ view }) => view === "history");
     assert.equal(historyCall.url.searchParams.get("historyPage"), "2");
     assert.equal(historyCall.url.searchParams.get("supplementRevision"), "sqlite-revision-synthetic");
     assert.match(sqliteTable().textContent, /second SQLite history page/);
-    await act(async () => [...host.querySelectorAll('details.sqlite-table')].at(-1).querySelector('summary').dispatchEvent(new window.MouseEvent('click', { bubbles: true })));
     assert.match(host.textContent, /original SQLite metadata/, "history navigation retains the original non-history sources");
-    await act(async () => sqliteTable().querySelector("details.sqlite-raw-row summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
-    assert.equal(sqliteTable().querySelector("details.sqlite-raw-row").open, true, "SQLite raw JSON uses the native disclosure summary");
+    await act(async () => sqliteTable().querySelector("details summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    assert.equal(sqliteTable().querySelector("details").open, true, "SQLite raw JSON uses the native disclosure summary");
 
     searchResponse.resolve({ ok: true, status: 200, json: async () => ({
       revision: "rollout-revision-synthetic",
@@ -215,8 +213,8 @@ test("SessionPanel 切换 JSONL / SQLite 保留两侧状态，history 翻页不�
     assert.equal(host.querySelector(".event-card")?.dataset.lineNumber, "2");
 
     await act(async () => sourceTabs[1].click());
-    assert.match(sqliteTable().textContent, /第 2 页，共 2 条/);
-    assert.match(sqliteTable().querySelector(".sqlite-row")?.textContent ?? "", /item-page-2/);
+    assert.match(sqliteTable().textContent, /2 条 · 第 2 \/ 2 页/);
+    assert.match(sqliteTable().querySelector(".event-raw-view > pre")?.textContent ?? "", /item-page-2/);
     assert.equal(calls.filter(({ view }) => view === "window").length, 1, "switching sources never re-reads the detail window");
     assert.equal(calls.filter(({ view }) => view === "history").length, 1, "returning to SQLite keeps its loaded history page");
 

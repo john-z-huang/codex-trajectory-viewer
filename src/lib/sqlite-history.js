@@ -278,6 +278,25 @@ export function projectSqliteRow(table, row) {
   return summaryProjection(table, row ?? {});
 }
 
+/** 将完整 SQLite 行适配为共享时间线记录，正文与原始行分别保留。 */
+export function projectSqliteTimelineRow(row, lineNumber, revision = "") {
+  const projection = projectSqliteRow("thread_items", row);
+  const type = sqliteItemType(row);
+  const kind = type === "userMessage" ? "user"
+    : ["agentMessage", "reasoning"].includes(type) ? "assistant"
+    : ["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "functionCallOutput"].includes(type) ? "tool-result"
+    : "event";
+  return {
+    lineNumber, kind, filterType: type, source: "sqlite",
+    title: projection.title,
+    timestamp: timestampValue(row?.created_at_ms ?? row?.started_at_ms, "created_at_ms"),
+    fields: projection.fields, warning: projection.warning,
+    contentParts: projection.blocks,
+    rawValue: row,
+    originalLocator: { revision },
+  };
+}
+
 /** 仅返回分段偏移，使文本有界展示且不复制完整内容。 */
 export function textChunkOffsets(value, chunkSize = SQLITE_TEXT_CHUNK_SIZE) {
   const text = String(value ?? "");

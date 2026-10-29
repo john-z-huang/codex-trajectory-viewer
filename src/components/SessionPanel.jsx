@@ -20,9 +20,11 @@ export function SessionPanel({
     searchLoading,
     error,
     historyLoading,
+    historySearchLoading,
     loadLine,
     searchNext,
     loadHistoryPage,
+    searchHistory,
     recoverStaleRevision,
     retry,
   } = useSessionDetail(sessionId, refreshVersion, {
@@ -61,10 +63,12 @@ export function SessionPanel({
         searchLoading={searchLoading}
         active={active}
         historyLoading={historyLoading}
+        historySearchLoading={historySearchLoading}
         onNavigateLine={loadLine}
         onSearch={searchNext}
         onRevisionStale={recoverStaleRevision}
         onLoadHistoryPage={loadHistoryPage}
+        onSearchHistory={searchHistory}
         onOpenSession={onOpenSession}
       />
     </>

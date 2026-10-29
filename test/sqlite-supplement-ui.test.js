@@ -5,145 +5,83 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { createServer } from "vite";
 
-test("SQLite 行 JSON 和分页控件只在表格展开时挂载", async () => {
+test("SQLite 说明及轮次独立于共享历史时间线，说明完整且原始 JSON 惰性展示", async () => {
   const window = new Window({ url: "http://localhost/" });
   const original = new Map();
-  const globals = {
-    window,
-    document: window.document,
-    navigator: window.navigator,
-    HTMLElement: window.HTMLElement,
-    Node: window.Node,
-    MouseEvent: window.MouseEvent,
-    IS_REACT_ACT_ENVIRONMENT: true,
-  };
-  for (const [key, value] of Object.entries(globals)) {
+  for (const [key, value] of Object.entries({ window, document: window.document, navigator: window.navigator, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true })) {
     original.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   }
-
   let vite;
   let root;
   try {
-    vite = await createServer({
-      configFile: new URL("../vite.config.js", import.meta.url).pathname,
-      server: { middlewareMode: true, hmr: false },
-      appType: "custom",
-      logLevel: "error",
-    });
+    vite = await createServer({ configFile: new URL("../vite.config.js", import.meta.url).pathname, server: { middlewareMode: true, hmr: false }, appType: "custom", logLevel: "error" });
     const { SqliteSupplement } = await vite.ssrLoadModule("/src/components/SqliteSupplement.jsx");
-    const host = window.document.createElement("div");
+    const host = window.document.createElement("section");
+    host.className = "session-tab-panel";
+    Object.defineProperty(host, "clientHeight", { value: 20000 });
+    host.getBoundingClientRect = () => ({ top: 0, bottom: 20000, height: 20000 });
+    host.scrollTo = () => {};
     window.document.body.append(host);
     root = createRoot(host);
-    const requestedPages = [];
-    const sources = [{
-      database: "thread_history_1.sqlite",
-      available: true,
-      tables: [{
-        table: "thread_turns",
-        rows: Array.from({ length: 60 }, (_, index) => ({
-          turn_id: `synthetic-turn-${index}`,
-          thread_id: "thread-synthetic",
-          payload: index === 0 ? "x".repeat(24_000) : `synthetic-row-${index}`,
-        })),
-        pagination: { page: 1, totalRows: 60, hasMore: true },
-      }, {
-        table: "thread_items",
-        rows: [
-          {
-            item_type: "userMessage",
-            item_json: JSON.stringify({ type: "userMessage", content: [
-              { type: "text", text: "**bold user text** and [unsafe](javascript:alert(1))" },
-              { type: "image", url: "https://example.invalid/user-image.png" },
-            ] }),
-            item_id: "synthetic-user-item",
-          },
-          {
-            item_type: "commandExecution",
-            item_json: JSON.stringify({ type: "commandExecution", aggregatedOutput: "**plain stdout**" }),
-            item_id: "synthetic-command-item",
-          },
-          {
-            item_type: "mcpToolCall",
-            item_json: JSON.stringify({ type: "mcpToolCall", tool: "read_note", result: { content: [
-              { type: "text", text: "**mcp result text**" },
-              { type: "image", url: "https://example.invalid/mcp-image.png" },
-            ] } }),
-            item_id: "synthetic-mcp-item",
-          },
-        ],
-      }],
-    }];
-
-    await act(async () => root.render(React.createElement(SqliteSupplement, {
-      sources,
-      historyLoading: false,
-      onLoadHistoryPage: (page) => requestedPages.push(page),
-    })));
-    const table = host.querySelector("details.sqlite-table");
-    assert.equal(host.querySelector(".sqlite-history-card"), null);
-    assert.equal(host.querySelector(".sqlite-row"), null, "raw rows stay collapsed");
-    assert.equal(host.querySelector(".history-pager"), null);
-
-    await act(async () => table.querySelector("summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
-    assert.equal(table.querySelectorAll(".sqlite-history-card").length, 60, "the client does not truncate server-returned non-history rows to 50");
-    assert.match(host.querySelector(".sqlite-history-card")?.textContent ?? "", /synthetic-turn-0/);
-    assert.equal(host.querySelector(".sqlite-row"), null, "raw row serialization is lazy");
-    assert.equal(host.querySelectorAll(".history-pager button").length, 2);
-    await act(async () => host.querySelectorAll(".history-pager button")[1].click());
-    assert.deepEqual(requestedPages, [2]);
-
-    const rawDetails = host.querySelector("details.sqlite-raw-row");
-    assert.equal(rawDetails.open, false);
-    assert.equal(rawDetails.querySelector("pre"), null, "raw SQLite JSON is not mounted while collapsed");
-    await act(async () => rawDetails.querySelector("summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
-    assert.equal(rawDetails.open, true, "the native disclosure opens through its summary");
-    const rawChunk = host.querySelector(".sqlite-row");
-    assert.ok(rawChunk.textContent.length <= 8_000, "only one bounded raw chunk mounts at once");
-    const expectedRawRow = { ...sources[0].tables[0].rows[0], payload: `refreshed-payload-${"z".repeat(24_000)}` };
-    const refreshedSources = [{
-      ...sources[0],
-      tables: [
-        { ...sources[0].tables[0], rows: [expectedRawRow, ...sources[0].tables[0].rows.slice(1)] },
-        sources[0].tables[1],
-      ],
-    }];
-    await act(async () => root.render(React.createElement(SqliteSupplement, {
-      sources: refreshedSources,
-      historyLoading: false,
-      onLoadHistoryPage: (page) => requestedPages.push(page),
-    })));
-    assert.match(host.querySelector(".sqlite-row")?.textContent ?? "", /refreshed-payload/);
-    assert.doesNotMatch(host.querySelector(".sqlite-row")?.textContent ?? "", /x{100}/, "expanded raw data follows the refreshed row");
-    const rawParts = [host.querySelector(".sqlite-row").textContent];
-    const rawPagerButtons = () => host.querySelectorAll(".sqlite-raw-content .sqlite-text-pager button");
-    while (!rawPagerButtons()[1].disabled) {
-      await act(async () => rawPagerButtons()[1].click());
-      rawParts.push(host.querySelector(".sqlite-row").textContent);
+    const longText = `${"说明内容\n".repeat(3000)}说明末尾`;
+    const sandbox = JSON.stringify({ type: "workspace-write", writable_roots: [longText] });
+    const stateRows = Array.from({ length: 60 }, (_, index) => ({ id: `thread-${index}`, extra: longText, ...(index < 3 ? { sandbox_policy: [sandbox, `旧格式\n${"😀".repeat(300)}`, null][index] } : {}) }));
+    const goal = { objective: longText, future_field: "**纯文本**", nullable: null, sandbox_policy: sandbox };
+    const itemRows = [
+      { item_id: "user", item_json: JSON.stringify({ type: "userMessage", content: [{ type: "text", text: "**用户正文** [unsafe](javascript:alert(1))" }, { type: "image", url: "https://example.invalid/image" }] }) },
+      { item_id: "command", item_json: JSON.stringify({ type: "commandExecution", aggregatedOutput: "**纯文本输出**" }) },
+      { item_id: "mcp", item_json: JSON.stringify({ type: "mcpToolCall", result: { content: [{ type: "text", text: "**MCP 正文**" }] } }) },
+    ];
+    const sources = [
+      { database: "thread_history_1.sqlite", available: true, tables: [{ table: "thread_turns", rows: [{ turn_id: "synthetic-turn", extra: longText }] }, { table: "thread_items", rows: itemRows, pagination: { page: 1, pageSize: 3, totalRows: 6, hasMore: true } }] },
+      { database: "goals_1.sqlite", available: true, tables: [{ table: "thread_goals", rows: [goal] }] },
+      { database: "state_5.sqlite", available: true, tables: [{ table: "threads", rows: stateRows }] },
+    ];
+    const pages = [];
+    const render = (values = sources) => root.render(React.createElement(SqliteSupplement, { sources: values, onLoadHistoryPage: (page) => pages.push(page) }));
+    await act(async () => render());
+    const info = host.querySelector(".sqlite-session-info");
+    const history = host.querySelector(".sqlite-conversation");
+    assert.equal(info.parentElement, history.parentElement, "metadata and conversations have separate sibling containers");
+    assert.deepEqual([...info.querySelectorAll(".sqlite-source-heading strong")].map((node) => node.textContent), ["state_5.sqlite", "goals_1.sqlite", "轮次记录"]);
+    assert.equal(info.querySelectorAll(".sqlite-session-info-row").length, 62);
+    assert.match(info.textContent, /synthetic-turn/);
+    assert.equal(history.textContent.includes("synthetic-turn"), false);
+    const policyValues = [...info.querySelectorAll("dt")].filter((node) => node.textContent === "sandbox_policy").map((node) => node.nextElementSibling.textContent);
+    assert.equal(policyValues[0], "workspace-write（详细配置已省略）");
+    assert.match(policyValues[1], /^旧格式 😀+…（已省略）$/u);
+    assert.equal(policyValues[2], "null");
+    assert.equal(policyValues[3], sandbox);
+    assert.ok([...info.querySelectorAll("dd")].some((node) => node.textContent === longText));
+    assert.equal(info.querySelector("button, input, .event-card"), null);
+    assert.equal(info.querySelector("details[open], pre"), null);
+    for (const [index, row] of [[0, stateRows[0]], [60, goal], [61, sources[0].tables[0].rows[0]]]) {
+      const disclosure = info.querySelectorAll("details")[index];
+      await act(async () => disclosure.querySelector("summary").click());
+      assert.equal(disclosure.querySelector("pre").textContent, JSON.stringify(row, null, 2));
+      await act(async () => disclosure.querySelector("summary").click());
+      assert.equal(disclosure.querySelector("pre"), null);
     }
-    assert.equal(rawParts.join(""), JSON.stringify(expectedRawRow, null, 2));
-    assert.equal(rawParts.join("").length > 24_000, true);
-
-    await act(async () => table.querySelector("summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
-    assert.equal(host.querySelector(".sqlite-history-card"), null);
-    assert.equal(host.querySelector(".history-pager"), null);
-
-    const itemTable = host.querySelectorAll("details.sqlite-table")[1];
-    await act(async () => itemTable.querySelector("summary").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
-    assert.equal(itemTable.querySelectorAll(".sqlite-history-card").length, 3);
-    assert.equal(itemTable.querySelector(".markdown-body strong")?.textContent, "bold user text");
-    assert.equal(itemTable.querySelectorAll("img").length, 0, "image content never loads remote images");
-    assert.notEqual(itemTable.querySelector(".markdown-body a")?.getAttribute("href"), "javascript:alert(1)");
-    assert.equal(itemTable.querySelector(".sqlite-history-plain")?.textContent, "{\n  \"type\": \"image\",\n  \"url\": \"https://example.invalid/user-image.png\"\n}");
-    assert.equal([...itemTable.querySelectorAll(".sqlite-history-plain")].some((node) => node.textContent === "**plain stdout**"), true);
-    assert.equal([...itemTable.querySelectorAll(".markdown-body strong")].some((node) => node.textContent === "mcp result text"), true);
+    assert.equal(history.querySelectorAll(".event-card").length, 3, "the common timeline renders every item");
+    assert.equal(history.querySelectorAll(".timeline-toolbar").length, 2);
+    assert.equal(history.querySelectorAll(".timeline-find").length, 2);
+    assert.equal(history.querySelectorAll(".timeline-jump").length, 2);
+    assert.equal(new Set([...history.querySelectorAll("input")].map((node) => node.id)).size, history.querySelectorAll("input").length);
+    assert.equal(history.querySelector(".markdown-body strong").textContent, "用户正文");
+    assert.equal(history.querySelector("img"), null);
+    assert.notEqual(history.querySelector(".markdown-body a")?.getAttribute("href"), "javascript:alert(1)");
+    assert.ok([...history.querySelectorAll("pre")].some((node) => node.textContent === "**纯文本输出**"));
+    assert.ok([...history.querySelectorAll("strong")].some((node) => node.textContent === "MCP 正文"));
+    await act(async () => history.querySelector('[aria-label="下一页"]').click());
+    assert.deepEqual(pages, [2]);
+    await act(async () => render([{ database: "state_5.sqlite", available: false, error: "说明数据库缺失" }, sources[0]]));
+    assert.match(info.textContent, /说明数据库缺失/);
+    assert.equal(history.querySelectorAll(".event-card").length, 3);
   } finally {
     if (root) await act(async () => root.unmount());
     if (vite) await vite.close();
     window.happyDOM.abort();
-    for (const [key, descriptor] of original) {
-      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-      else delete globalThis[key];
-    }
+    for (const [key, value] of original) { if (value) Object.defineProperty(globalThis, key, value); else delete globalThis[key]; }
   }
 });

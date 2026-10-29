@@ -25,6 +25,7 @@ function partAt(entry, index) {
       key: `part-${index}`,
       text: typeof part.text === "string" ? part.text : String(part.text ?? ""),
       markdown: part.kind === "markdown",
+      label: part.label,
     };
   }
   if (index !== 0 || entry.text == null || entry.text === "") return null;
@@ -145,6 +146,7 @@ function EventContent({ entry, entryId, summary, cursor, onBodyCursorChange, ful
     if (!part?.text) continue;
     blocks.push(
       <div className="event-content-block" key={part.key}>
+        {part.label && <h4>{part.label}</h4>}
         {part.markdown
           ? <MarkdownContent>{part.text}</MarkdownContent>
           : <pre className="event-text tool-output-plain">{part.text}</pre>}
@@ -167,7 +169,7 @@ function copyableEntry(entry) {
   if (Array.isArray(entry.contentParts)) {
     result.contentParts = entry.contentParts
       .filter((part) => part && typeof part.text === "string")
-      .map((part) => ({ ...(typeof part.kind === "string" ? { kind: part.kind } : {}), text: part.text }));
+      .map((part) => ({ ...(typeof part.kind === "string" ? { kind: part.kind } : {}), ...(typeof part.label === "string" ? { label: part.label } : {}), text: part.text }));
   }
   return result;
 }
@@ -183,13 +185,32 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
   const [manualOffset, setManualOffset] = useState(String(offset));
   const requestRef = useRef(null);
   const locator = entry.originalLocator;
+  const local = Object.hasOwn(entry, "rawValue");
+  const localBytes = useMemo(() => local ? new TextEncoder().encode(JSON.stringify(entry.rawValue, null, 2)) : null, [local, entry.rawValue]);
+  const [downloadUrl, setDownloadUrl] = useState("");
   const rawOffsetInputId = `raw-offset-${useId()}`;
+
+  useEffect(() => {
+    if (!localBytes || typeof URL.createObjectURL !== "function") return undefined;
+    const url = URL.createObjectURL(new Blob([localBytes], { type: "application/json" }));
+    setDownloadUrl(url);
+    return () => { URL.revokeObjectURL(url); };
+  }, [localBytes]);
 
   useEffect(() => {
     setManualOffset(String(offset));
     setChunk(null);
     setLoading(true);
     setError("");
+    if (localBytes) {
+      let start = Math.min(offset, localBytes.length);
+      while (start < localBytes.length && (localBytes[start] & 0xc0) === 0x80) start += 1;
+      let end = Math.min(start + 64 * 1024, localBytes.length);
+      while (end < localBytes.length && (localBytes[end] & 0xc0) === 0x80) end -= 1;
+      setChunk({ offset: start, nextOffset: end, byteLength: localBytes.length, done: end === localBytes.length, raw: new TextDecoder().decode(localBytes.subarray(start, end)) });
+      setLoading(false);
+      return undefined;
+    }
     const controller = new AbortController();
     const token = Symbol("raw chunk");
     const isCurrent = () => !controller.signal.aborted && requestRef.current?.token === token;
@@ -229,7 +250,7 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
       controller.abort();
       task.cancel();
     };
-  }, [entry.lineNumber, locator?.revision, offset, onRevisionStale, sessionId]);
+  }, [entry.lineNumber, locator?.revision, offset, onRevisionStale, sessionId, localBytes]);
 
   useLayoutEffect(() => {
     requestRef.current?.task?.setPriority(active ? 1 : 0);
@@ -251,7 +272,7 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
     onOffsetChange(entry.lineNumber, offsetHistory.at(-1), "back");
   }
 
-  if (!locator?.revision || !sessionId) return <p className="warning">缺少原文定位信息。</p>;
+  if (!local && (!locator?.revision || !sessionId)) return <p className="warning">缺少原文定位信息。</p>;
   return (
     <div className="event-raw-view">
       <div className="event-raw-toolbar">
@@ -264,12 +285,12 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
         <button type="button" onClick={goPrevious} disabled={loading || offsetHistory.length === 0}>上一片</button>
         <button type="button" onClick={() => chunk && !chunk.done && onOffsetChange(entry.lineNumber, chunk.nextOffset, "push")} disabled={loading || !chunk || chunk.done}>下一片</button>
         <span className="event-raw-download-note">轨迹版本变化时，请刷新后重试。</span>
-        <a
-          href={sessionViewUrl(sessionId, { view: "download", revision: locator.revision, line: entry.lineNumber })}
-          download={`rollout-line-${entry.lineNumber}.txt`}
+        {(!local || downloadUrl) && <a
+          href={local ? downloadUrl : sessionViewUrl(sessionId, { view: "download", revision: locator.revision, line: entry.lineNumber })}
+          download={local ? `sqlite-record-${entry.lineNumber}.json` : `rollout-line-${entry.lineNumber}.txt`}
         >
           下载完整原文
-        </a>
+        </a>}
       </div>
       {loading && <p role="status">正在读取原文片段…</p>}
       {error && <p className="warning" role="alert">{error}</p>}
@@ -302,6 +323,8 @@ export const TimelineEventCard = memo(function TimelineEventCard({
   onScrollToEntry,
   onRevisionStale,
 }) {
+  const unit = entry.source === "sqlite" ? "条" : "行";
+  const sourceLabel = entry.source === "sqlite" ? "SQLite" : "JSONL";
   const [copyStatus, setCopyStatus] = useState("");
   const [highlighted, setHighlighted] = useState(false);
   const [copySourceEntry, setCopySourceEntry] = useState(null);
@@ -334,7 +357,8 @@ export const TimelineEventCard = memo(function TimelineEventCard({
     copyTaskRef.current?.setPriority(active ? 1 : 0);
   }, [active]);
 
-  async function writeCopy(text) {
+  async function writeCopy(text, token) {
+    if (copySequenceRef.current !== token) return;
     const normalized = text.replace(/\n{3,}/g, "\n\n").trim();
     if (!normalized) {
       setCopyStatus("没有可复制内容");
@@ -345,11 +369,11 @@ export const TimelineEventCard = memo(function TimelineEventCard({
       const clipboard = globalThis.navigator?.clipboard;
       if (!clipboard?.writeText) throw new Error("Clipboard API unavailable");
       await clipboard.writeText(normalized);
-      setCopyStatus("已复制");
+      if (copySequenceRef.current === token) setCopyStatus("已复制");
     } catch {
-      setCopyStatus("复制失败");
+      if (copySequenceRef.current === token) setCopyStatus("复制失败");
     } finally {
-      copyPending.current = false;
+      if (copySequenceRef.current === token) copyPending.current = false;
     }
   }
 
@@ -357,7 +381,7 @@ export const TimelineEventCard = memo(function TimelineEventCard({
     if (!copySourceEntry) return;
     const text = renderedText(copySourceRef.current?.querySelector(".event-content"));
     setCopySourceEntry(null);
-    void writeCopy(text);
+    void writeCopy(text, copySourceEntry.copyToken);
   }, [copySourceEntry]);
 
   function cancelCopy() {
@@ -375,6 +399,7 @@ export const TimelineEventCard = memo(function TimelineEventCard({
     if (copyPending.current) return;
     copyPending.current = true;
     setCopyStatus("");
+    const token = ++copySequenceRef.current;
     if (entry.kind !== "oversized" && !entry.projectionLimited) {
       const source = copyableEntry(entry);
       if (!source) {
@@ -382,7 +407,7 @@ export const TimelineEventCard = memo(function TimelineEventCard({
         setCopyStatus("没有可复制内容");
         return;
       }
-      setCopySourceEntry(source);
+      setCopySourceEntry({ ...source, copyToken: token });
       return;
     }
 
@@ -393,7 +418,6 @@ export const TimelineEventCard = memo(function TimelineEventCard({
       return;
     }
     const controller = new AbortController();
-    const token = ++copySequenceRef.current;
     const isCurrent = () => !controller.signal.aborted && copySequenceRef.current === token;
     const task = enqueueSessionView(sessionId, {
       view: "download",
@@ -413,7 +437,7 @@ export const TimelineEventCard = memo(function TimelineEventCard({
         if (!isCurrent() || raw === STALE_SESSION_RESPONSE) return;
         const parsed = parseRolloutText(raw)[0];
         const source = copyableEntry(parsed);
-        if (source) setCopySourceEntry({ ...source, lineNumber: entry.lineNumber });
+        if (source) setCopySourceEntry({ ...source, lineNumber: entry.lineNumber, copyToken: token });
         else {
           copyPending.current = false;
           setCopyStatus("没有可复制内容");
@@ -472,14 +496,16 @@ export const TimelineEventCard = memo(function TimelineEventCard({
         <div className="event-meta">
           <span className="event-title" title={entry.titleTruncated ? "标题预览已省略；完整记录可在原始 JSON 中查看。" : undefined}>{entry.title}</span>
           <time>{formatDate(entry.timestamp)}</time>
-          <span className="line-number">第 {entry.lineNumber} 行</span>
+          <span className="line-number">第 {entry.lineNumber} {unit}</span>
         </div>
+        {!!entry.fields?.length && <dl className="sqlite-history-fields">{entry.fields.map((field, index) => <div key={index}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}</dl>}
+        {entry.warning && <p className="warning">{entry.warning}；原始数据仍可查看。</p>}
         <ConversationControls
           controlsVisible={controlsVisible}
-          controlsLabel={`第 ${entry.lineNumber} 行 JSONL 对象操作`}
+          controlsLabel={`第 ${entry.lineNumber} ${unit} ${sourceLabel} 对象操作`}
           collapsed={collapsed}
-          collapsedActionLabel={`收起第 ${entry.lineNumber} 行 JSONL 对象`}
-          expandedActionLabel={`展开第 ${entry.lineNumber} 行 JSONL 对象`}
+          collapsedActionLabel={`收起第 ${entry.lineNumber} ${unit} ${sourceLabel} 对象`}
+          expandedActionLabel={`展开第 ${entry.lineNumber} ${unit} ${sourceLabel} 对象`}
           onCopy={copyEntryContent}
           onCancelCopy={cancelCopy}
           copyPending={copyPending.current}

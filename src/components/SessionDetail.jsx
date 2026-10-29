@@ -13,10 +13,12 @@ export function SessionDetail({
   searchLoading,
   active = true,
   historyLoading,
+  historySearchLoading,
   onNavigateLine,
   onSearch,
   onRevisionStale,
   onLoadHistoryPage,
+  onSearchHistory,
   onOpenSession,
 }) {
   return (
@@ -110,7 +112,10 @@ export function SessionDetail({
             sources={detail.supplement}
             active={sourceActive}
             historyLoading={historyLoading}
+            historySearchLoading={historySearchLoading}
             onLoadHistoryPage={onLoadHistoryPage}
+            onSearchHistory={onSearchHistory}
+            revision={detail.supplementRevision}
           />
         )}
       />

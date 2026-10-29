@@ -5,12 +5,103 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { readSessionSupplement, readSessionSupplementSnapshot, SupplementRevisionError } from "../server-dist/sqlite-reader.js";
+import { readSessionSupplement, readSessionSupplementSnapshot, searchSessionHistory, SupplementRevisionError } from "../server-dist/sqlite-reader.js";
 
 function createDatabase(file, sql) {
   const db = new DatabaseSync(file);
   try { db.exec(sql); } finally { db.close(); }
 }
+
+test("SQLite 全历史字面搜索跨页、回绕、区分大小写并沿用只读快照关联", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "codex-history-search-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const file = path.join(home, "thread_history_1.sqlite");
+  const writer = new DatabaseSync(file);
+  t.after(() => writer.close());
+  writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT, summary TEXT); CREATE TABLE thread_items(turn_id TEXT, rollout_ordinal INTEGER, item_json TEXT);");
+  const needle = 'Needle %_ "quoted"';
+  for (let index = 0; index < 60; index += 1) {
+    writer.prepare("INSERT INTO thread_turns VALUES ('target', ?, 'turn-only-token')").run(`turn-${index}`);
+    writer.prepare("INSERT INTO thread_items VALUES (?, ?, ?)").run(`turn-${index}`, index, index === 51 || index === 55 ? "x".repeat(20_000) + needle : `plain-${index}`);
+  }
+  writer.exec("INSERT INTO thread_turns VALUES ('other', 'foreign-turn', 'foreign'); INSERT INTO thread_items VALUES ('foreign-turn', -1, 'foreign-only-token');");
+  const session = { sessionId: "target" };
+  const { supplementRevision } = await readSessionSupplementSnapshot(home, session);
+  const search = (query, afterIndex = 0, revision = supplementRevision) => searchSessionHistory(home, session, revision, query, afterIndex);
+  assert.deepEqual(await search(needle), { rowIndex: 52, page: 2, totalRows: 60 });
+  assert.deepEqual(await search(needle, 52), { rowIndex: 56, page: 2, totalRows: 60 });
+  assert.deepEqual(await search(needle, 56), { rowIndex: 52, page: 2, totalRows: 60 });
+  for (const query of [needle.toLowerCase(), "foreign-only-token", "turn-only-token", "absent"]) {
+    assert.deepEqual(await search(query), { rowIndex: null, page: null, totalRows: 60 });
+  }
+  await assert.rejects(search(needle, 0, "forged"), SupplementRevisionError);
+  writer.prepare("INSERT INTO thread_items VALUES ('turn-0', -1, ?)").run(needle);
+  const before = await readFile(file);
+  const walBefore = await readFile(`${file}-wal`);
+  assert.deepEqual(await search(needle), { rowIndex: 52, page: 2, totalRows: 60 }, "appends with low ordinals stay outside the original search range");
+  assert.deepEqual(await readFile(file), before);
+  assert.deepEqual(await readFile(`${file}-wal`), walBefore);
+  writer.exec("UPDATE thread_items SET item_json = 'rewritten' WHERE rollout_ordinal = 51;");
+  await assert.rejects(search(needle), SupplementRevisionError);
+});
+
+test("SQLite 搜索对缺库及缺历史项目表返回可读错误", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "codex-history-search-missing-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const session = { sessionId: "target" };
+  const missing = await readSessionSupplementSnapshot(home, session);
+  await assert.rejects(searchSessionHistory(home, session, missing.supplementRevision, "query"), /database not present/);
+  createDatabase(path.join(home, "thread_history_1.sqlite"), "CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT); INSERT INTO thread_turns VALUES ('target', 'turn');");
+  const partial = await readSessionSupplementSnapshot(home, session);
+  await assert.rejects(searchSessionHistory(home, session, partial.supplementRevision, "query"), /table not present/);
+});
+
+test("会话说明全量读取所有关联行与长字段，历史仍按页读取且不修改合成数据库", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "codex-sqlite-full-description-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const description = `${"完整说明".repeat(4_000)}说明末尾`;
+  const files = ["state_5.sqlite", "goals_1.sqlite", "thread_history_1.sqlite"].map((name) => path.join(home, name));
+  for (const [index, file] of files.entries()) {
+    const db = new DatabaseSync(file);
+    try {
+      const table = ["threads", "thread_goals", "thread_items"][index];
+      db.exec(`CREATE TABLE ${table}(thread_id TEXT, extra_field TEXT, binary_value BLOB)`);
+      const insert = db.prepare(`INSERT INTO ${table} VALUES (?, ?, ?)`);
+      db.exec("BEGIN");
+      for (let row = 0; row < 505; row += 1) insert.run("target", row === 504 ? description : `row-${row}`, new Uint8Array([0, 255]));
+      insert.run("other", "不能读取其他会话说明", new Uint8Array());
+      db.exec("COMMIT");
+    } finally { db.close(); }
+  }
+  const before = await Promise.all(files.map(async (file) => createHash("sha256").update(await readFile(file)).digest("hex")));
+  const session = { id: "target", sessionId: "target" };
+  const legacy = await readSessionSupplement(home, session, { historyPage: 2 });
+  const snapshot = await readSessionSupplementSnapshot(home, session, { historyPage: 2 });
+  for (const sources of [legacy, snapshot.supplement]) {
+    for (const source of sources.filter((source) => source.database !== "thread_history_1.sqlite")) {
+      const table = source.tables[0];
+      assert.equal(table.rows.length, 505);
+      assert.equal(table.rows.at(-1).extra_field, description);
+      assert.deepEqual(table.rows.at(-1).binary_value, [0, 255]);
+      assert.equal(table.pagination, undefined);
+      assert.ok(table.rows.every((row) => row.thread_id === "target"));
+    }
+    const items = sources.find((source) => source.database === "thread_history_1.sqlite").tables.find((table) => table.table === "thread_items");
+    assert.equal(items.rows.length, 50);
+    assert.equal(items.rows[0].extra_field, "row-50");
+    assert.equal(items.pagination.totalRows, 505);
+    assert.equal(items.pagination.page, 2);
+  }
+  for (const sources of [
+    await readSessionSupplement(home, session, { historyPage: 11 }),
+    (await readSessionSupplementSnapshot(home, session, { historyPage: 11 })).supplement,
+  ]) {
+    const items = sources.find((source) => source.database === "thread_history_1.sqlite").tables.find((table) => table.table === "thread_items");
+    assert.equal(items.rows.at(-1).extra_field, description, "history fields also retain text beyond 12000 characters");
+    assert.deepEqual(items.rows.at(-1).binary_value, [0, 255]);
+  }
+  assert.deepEqual(await Promise.all(files.map(async (file) => createHash("sha256").update(await readFile(file)).digest("hex"))), before);
+});
 
 test("SQLite 快照按原始行边界分页，关联 items 不依赖当前 turns 页且不读入低 ordinal 新行", async (t) => {
   const home = await mkdtemp(path.join(os.tmpdir(), "codex-sqlite-snapshot-relations-"));

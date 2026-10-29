@@ -44,6 +44,7 @@ npm start
 - `GET /api/sessions` 返回从允许的会话目录发现并补充 SQLite 元数据的会话摘要。
 - `GET /api/sessions/:id` 返回已发现会话的详情、JSONL 原文、SQLite 补充数据和关联子代理。`:id` 是不透明会话 ID，不接受文件路径。
 - `GET /api/sessions/:id?view=history&historyPage=1&supplementRevision=...` 不读取或返回完整 JSONL。正式页面携带窗口返回的不透明 `supplementRevision`，只返回原始会话范围内的 `thread_history_1.sqlite` 分页数据，并标记 `historyOnly: true`；客户端合并该来源，保留原窗口中的线程及目标元数据。追加历史、其他会话写入和线程元数据更新不阻断翻页；已有历史变更时返回 `409`。省略版本参数保留返回全部 SQLite 补充来源的旧 API 兼容。`historyPage` 默认第 1 页，每页 50 条；兼容详情接口也接受该参数。
+- `GET /api/sessions/:id?view=history-search&q=...&afterIndex=0&supplementRevision=...` 在同一只读快照内搜索全部历史对话，按原始记录 JSON 和文本字段进行区分大小写的字面匹配（1–256 个 UTF-16 代码单元），返回下一个匹配的 `rowIndex`、`page` 与 `totalRows`；到末尾后回绕，不匹配会话说明或轮次记录。已有历史变化时返回 `409`，由用户手动刷新。
 - `GET /api/sessions/:id?view=window&line=1` 返回会话元数据、SQLite 补充数据、子代理摘要，以及包含目标行的 32 行窗口。响应中的 `rollout` 提供版本 `revision`、总行数和当前行范围；超长行保留定位信息，原文另行读取。
 - `GET /api/sessions/:id?view=page&revision=...&line=33` 只返回该版本的行窗口。每行最多返回 64 KiB 原始 UTF-8 内容，超限行通过原文接口访问；JSON 转义后的响应字节数可能更大。
 - `GET /api/sessions/:id?view=raw&revision=...&line=1&offset=0` 返回最多 16 KiB、保持 UTF-8 字符完整的原文片段。`offset` 是行内字节偏移，后续请求使用响应的 `nextOffset`；`view=download&revision=...&line=1` 流式下载完整单行原文。
@@ -61,7 +62,9 @@ npm start
 - SQLite 仅尝试打开 `CODEX_SQLITE_HOME` 根目录中的 `state_5.sqlite`、`thread_history_1.sqlite` 和 `goals_1.sqlite`，并以 SQLite 原生只读模式访问。不会探测或打开日志、记忆、队列等其他数据库。
 - SQLite 查询前先检查表和列。只读取 `threads`、`thread_turns`、`thread_items`、`thread_goals`；按会话 ID / 轮次 ID 参数化关联，schema 缺失或变更会以来源状态显示。
 - SQLite 的会话标题、工作目录、模型、`tokens_used`、来源与更新时间补充到 JSONL 已发现的会话摘要中；归档状态以 rollout 所在目录为准。数据库缺失、损坏或无法匹配时继续展示 JSONL 数据。
-- `thread_turns` 与 `thread_items` 通过 `historyPage` 参数每页读取 50 行，页面提供前后翻页；其他 SQLite 表每表最多返回 500 行。SQLite 正文和原始行按最多 8,000 个 UTF-16 代码单元分段，原始行仅在展开后序列化，完整内容均可访问。只有已识别的消息正文和工具文本使用安全 Markdown，命令、参数、diff 和未知结构保持纯文本。
+- SQLite 页面分为两个容器：上方集中展示 `state_5.sqlite`、`goals_1.sqlite` 的会话说明及 `thread_history_1.sqlite` 的轮次记录；每条记录保留默认折叠的“原始 JSON”入口。`sandbox_policy` 正文仅显示沙箱类型或简短预览，完整内容可在原始 JSON 中查看，其余说明字段完整展示。
+- 下方历史对话实际复用 JSONL 的 `Timeline` 与 `TimelineEventCard`：上下工具栏、全历史搜索、序号跳转、分页、类型筛选、键盘导航、虚拟化、正文分段、完整复制及取消、收起与阅读位置状态共用。SQLite 原始行已完整到达浏览器，使用相同原文控件在本地分片和下载，不另发 JSONL 原文请求。
+- `thread_turns` 与 `thread_items` 通过 `historyPage` 参数每页读取 50 行。服务端完整读取并返回每条 SQLite 记录的字段，不截断对话正文、`item_json` 或其他长文本；二进制字段以完整字节数组表示。浏览器端沿用共享时间线的展示边界：长正文按约 16 Ki 个 UTF-16 代码单元分段，原文按 64 KiB 分片；完整原文仅在展开后序列化。只有已识别的消息正文和工具文本使用安全 Markdown，命令、参数、diff、会话说明和未知结构保持纯文本。
 - 服务绑定 IPv4 回环地址 `127.0.0.1`。它不写入、复制或上传 Codex 会话数据，也不连接远程服务。
 - 每一行单独解析。未知记录保留完整原始 JSON；无效 JSON 行保留原文并显示解析错误，不会中断整份会话。
 - 查看器保持 JSONL 物理行序，不按时间戳重排；空行、无时间戳记录及损坏行均可按原始行号定位。复杂或超长记录的预览可以降级为说明，完整原文仍可访问。
