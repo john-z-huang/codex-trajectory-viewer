@@ -1,4 +1,5 @@
 import { mcpToolResultParts, toolOutputParts } from "./markdown-content.js";
+import { jsonlRecordFilterType } from "./conversation-types.js";
 
 const textFrom = (value) => {
   if (typeof value === "string") return value;
@@ -141,9 +142,9 @@ function classify(record) {
       const eventFields = Object.fromEntries(Object.entries(detail).filter(([key]) => key !== "item"));
       return { kind: "event", title: eventTitles[event], text: `${readableFields(eventFields)}\n已完成项目:\n${responseItemSummary(detail.item).split("\n").map((line) => `  ${line}`).join("\n")}` };
     }
-    return { kind: "event", title: eventTitles[event] ?? (event || type), text: readableFields(payload) };
+    return { kind: "event", title: typeof event === "string" && Object.hasOwn(eventTitles, event) ? eventTitles[event] : (event || type), text: readableFields(payload) };
   }
-  return { kind: "event", title: recordTitles[type] ?? type, text: readableFields(payload) };
+  return { kind: "event", title: typeof type === "string" && Object.hasOwn(recordTitles, type) ? recordTitles[type] : type, text: readableFields(payload) };
 }
 
 const MAX_ROLLOUT_PAGE_LINES = 32;
@@ -311,6 +312,7 @@ function projectRolloutLine(line, index, context) {
       lineNumber,
       timestamp: timestampFor(record),
       ...view,
+      filterType: jsonlRecordFilterType(record, view.kind),
       originalLocator,
     };
     const serialized = JSON.stringify(projected);
@@ -344,7 +346,7 @@ function parseRawLine(raw, lineNumber) {
 
   try {
     const view = classify(record);
-    return { lineNumber, timestamp: legacyTimestamp(record), ...view, raw, record };
+    return { lineNumber, timestamp: legacyTimestamp(record), ...view, filterType: jsonlRecordFilterType(record, view.kind), raw, record };
   } catch (error) {
     return {
       lineNumber,

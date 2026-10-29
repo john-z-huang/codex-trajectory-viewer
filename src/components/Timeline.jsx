@@ -2,6 +2,8 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import { DEFAULT_VIRTUAL_ITEM_HEIGHT } from "../lib/virtual-window.js";
 import { useVirtualWindow } from "../hooks/useVirtualWindow.js";
 import { TimelineEventCard } from "./TimelineEventCard.jsx";
+import { ConversationTypeFilter } from "./ConversationTypeFilter.jsx";
+import { JSONL_RECORD_TYPES, recordFilterType } from "../lib/conversation-types.js";
 
 const TIMELINE_OVERSCAN_PX = 520;
 const TIMELINE_MAX_MOUNTED_CARDS = 100;
@@ -56,6 +58,7 @@ function TimelineToolbar({
   onJumpSubmit,
   onFindSubmit,
   onNavigateLine,
+  filterProps,
 }) {
   const toolbarId = useId();
   const ordinalInputId = `timeline-ordinal-${toolbarId}`;
@@ -84,12 +87,13 @@ function TimelineToolbar({
         </form>
         <span className="timeline-navigation-status" role="status" aria-live="polite">{findStatus}</span>
       </div>
+      <ConversationTypeFilter {...filterProps} />
     </div>
   );
 }
 
 export function Timeline({
-  entries,
+  entries: pageEntries,
   rollout,
   currentLine = 1,
   pageLoading = false,
@@ -100,11 +104,13 @@ export function Timeline({
   onSearch,
   onRevisionStale,
 }) {
+  const [hiddenTypes, setHiddenTypes] = useState(() => new Set());
+  const entries = useMemo(() => pageEntries.filter((entry) => !hiddenTypes.has(recordFilterType(entry.filterType ?? entry.kind, JSONL_RECORD_TYPES))), [pageEntries, hiddenTypes]);
   const entryKeys = useMemo(() => entries.map(entryKey), [entries]);
-  const revision = rollout?.revision ?? entries[0]?.originalLocator?.revision ?? "";
-  const totalLines = Number.isSafeInteger(rollout?.totalLines) ? rollout.totalLines : entries.length;
+  const revision = rollout?.revision ?? pageEntries[0]?.originalLocator?.revision ?? "";
+  const totalLines = Number.isSafeInteger(rollout?.totalLines) ? rollout.totalLines : pageEntries.length;
   const pageSize = Number.isSafeInteger(rollout?.pageSize) && rollout.pageSize > 0 ? rollout.pageSize : 32;
-  const currentPage = totalLines > 0 ? Math.floor(((rollout?.startLine || entries[0]?.lineNumber || 1) - 1) / pageSize) + 1 : 0;
+  const currentPage = totalLines > 0 ? Math.floor(((rollout?.startLine || pageEntries[0]?.lineNumber || 1) - 1) / pageSize) + 1 : 0;
   const totalPages = totalLines > 0 ? Math.ceil(totalLines / pageSize) : 0;
   const timelineRef = useRef(null);
   const activeRef = useRef(active);
@@ -219,6 +225,10 @@ export function Timeline({
           pendingFocusRef.current = { lineNumber: pendingNavigation.lineNumber };
           setFocusRequest((current) => current + 1);
         }
+      } else if (pageEntries.some((entry) => entry.lineNumber === pendingNavigation.lineNumber)) {
+        pendingNavigationRef.current = null;
+        pendingFocusRef.current = null;
+        setFindStatus(`第 ${pendingNavigation.lineNumber} 行已被类型筛选隐藏，请调整显示类型。`);
       } else if (!pendingNavigation.pageRequested && onNavigateLine) {
         pendingNavigationRef.current = { ...pendingNavigation, pageRequested: true };
         void onNavigateLine(pendingNavigation.lineNumber);
@@ -243,7 +253,7 @@ export function Timeline({
       top: Math.max(0, Math.min(targetTop, maxScrollTop)),
       behavior: "smooth",
     });
-  }, [active, entries, onNavigateLine, readingRevision, virtualWindow.scrollToIndex]);
+  }, [active, entries, pageEntries, onNavigateLine, readingRevision, virtualWindow.scrollToIndex]);
 
   useLayoutEffect(() => {
     if (!active) return;
@@ -324,6 +334,12 @@ export function Timeline({
   const navigateLine = useCallback((lineNumber, align = "start", moveFocus = false) => {
     if (!Number.isSafeInteger(lineNumber) || lineNumber < 1 || lineNumber > totalLines) return;
     const index = entries.findIndex((entry) => entry.lineNumber === lineNumber);
+    if (index < 0 && pageEntries.some((entry) => entry.lineNumber === lineNumber)) {
+      pendingNavigationRef.current = null;
+      pendingFocusRef.current = null;
+      setFindStatus(`第 ${lineNumber} 行已被类型筛选隐藏，请调整显示类型。`);
+      return;
+    }
     if (!activeRef.current) {
       pendingNavigationRef.current = { lineNumber, align, moveFocus, pageRequested: false };
       if (moveFocus) pendingFocusRef.current = { lineNumber };
@@ -339,7 +355,7 @@ export function Timeline({
     }
     pendingNavigationRef.current = { lineNumber, align, moveFocus, pageRequested: true };
     if (onNavigateLine) void onNavigateLine(lineNumber);
-  }, [active, entries, onNavigateLine, totalLines, virtualWindow.scrollToIndex]);
+  }, [active, entries, pageEntries, onNavigateLine, totalLines, virtualWindow.scrollToIndex]);
 
   const scrollToEntry = useCallback((event, edge) => {
     const lineNumber = edge === "first" ? 1 : totalLines;
@@ -391,7 +407,11 @@ export function Timeline({
     if (!card) return;
     event.preventDefault();
     const currentLineNumber = Number(card.dataset.lineNumber);
-    const nextLine = Math.max(1, Math.min(totalLines, currentLineNumber + (event.key === "ArrowDown" ? 1 : -1)));
+    const direction = event.key === "ArrowDown" ? 1 : -1;
+    const currentIndex = entries.findIndex((entry) => entry.lineNumber === currentLineNumber);
+    const nextEntry = entries[currentIndex + direction];
+    const pageBoundary = direction > 0 ? pageEntries.at(-1)?.lineNumber : pageEntries[0]?.lineNumber;
+    const nextLine = nextEntry?.lineNumber ?? Math.max(1, Math.min(totalLines, (pageBoundary ?? currentLineNumber) + direction));
     if (nextLine === currentLineNumber) return;
     navigateLine(nextLine, "center", true);
   }
@@ -425,12 +445,21 @@ export function Timeline({
     onJumpSubmit: jumpToOrdinal,
     onFindSubmit: findNext,
     onNavigateLine: navigateLine,
+    filterProps: {
+      options: JSONL_RECORD_TYPES,
+      hiddenTypes,
+      onChange: setHiddenTypes,
+      visibleCount: entries.length,
+      totalCount: pageEntries.length,
+      note: "筛选应用于每页展示；行号、分页和原文查找仍按全部记录。",
+    },
   };
 
   return (
     <>
       <TimelineToolbar {...toolbarProps} />
       {pageLoading && <p className="timeline-load-status" role="status">正在读取第 {currentLine || 1} 行所在页…</p>}
+      {!pageLoading && pageEntries.length > 0 && !entries.length && <p className="source-note" role="status">当前页的记录已全部隐藏，请调整显示类型或继续翻页。</p>}
       <div
         className="timeline virtual-timeline"
         ref={setTimelineRef}
