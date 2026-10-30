@@ -1,5 +1,6 @@
 import { sessionDisplayTitle } from "../lib/session-identity.js";
 import { SessionPanel } from "./SessionPanel.jsx";
+import { browserLogger, createLogId } from "../lib/logger.js";
 
 export function SessionWorkspace({
   sessions,
@@ -15,9 +16,12 @@ export function SessionWorkspace({
   onRequestStart,
   onRequestSettled,
   onPanelClosed,
+  operationIdForTab,
 }) {
   function closeTab(event, tab) {
     event.stopPropagation();
+    const operationId = createLogId();
+    browserLogger.log("browser_tab", { action: "close", tab_id: tab.id, operation_id: operationId }, { operation_id: operationId, tab_id: tab.id });
     onPanelClosed?.(tab.id);
     dispatchTabs({ type: "close", id: tab.id });
   }
@@ -51,7 +55,12 @@ export function SessionWorkspace({
                 aria-selected={selected}
                 aria-controls={`session-panel-${tab.id}`}
                 title={label}
-                onClick={() => dispatchTabs({ type: "activate", id: tab.id })}
+                onClick={() => {
+                  if (selected) return;
+                  const operationId = createLogId();
+                  browserLogger.log("browser_tab", { action: "reactivate", tab_id: tab.id, operation_id: operationId }, { operation_id: operationId, tab_id: tab.id });
+                  dispatchTabs({ type: "activate", id: tab.id });
+                }}
               >
                 {label}
               </button>
@@ -82,6 +91,7 @@ export function SessionWorkspace({
               sessionId={tab.sessionId}
               panelId={tab.id}
               refreshVersion={refreshVersion}
+              operationId={operationIdForTab?.(tab.id)}
               active={tab.id === activeTabId}
               onRequestStart={onRequestStart}
               onRequestSettled={onRequestSettled}

@@ -1,6 +1,7 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { formatDate } from "../lib/formatters.js";
 import { groupSessionsByProject } from "../lib/projects.js";
+import { browserLogger, createLogId } from "../lib/logger.js";
 import { normalizedAgentPath, sessionDisplayTitle, sessionKindLabel } from "../lib/session-identity.js";
 import { useVirtualWindow } from "../hooks/useVirtualWindow.js";
 
@@ -22,6 +23,7 @@ function flattenProjectGroups(projectGroups) {
 export function SessionSearch({ sessions, activeSessionId, onOpenSession, onRefresh, loading }) {
   const [search, setSearch] = useState("");
   const projectGroups = useMemo(() => groupSessionsByProject(sessions, search), [sessions, search]);
+  const previousSearchRef = useRef(search);
   const listRef = useRef(null);
   const rowRefCallbacks = useRef(new Map());
   const pendingFocusKey = useRef(null);
@@ -59,6 +61,23 @@ export function SessionSearch({ sessions, activeSessionId, onOpenSession, onRefr
 
   useLayoutEffect(() => {
     virtualWindow.scrollToTop();
+  }, [search]);
+
+  useEffect(() => {
+    if (previousSearchRef.current === search) return undefined;
+    previousSearchRef.current = search;
+    const resultCount = projectGroups.reduce((count, group) => count + group.sessions.length, 0);
+    const operationId = createLogId();
+    const timer = globalThis.setTimeout(() => {
+      browserLogger.log("browser_filter", {
+        data_source: "list",
+        query_length: search.length,
+        result_count: resultCount,
+        hidden_count: Math.max(0, sessions.length - resultCount),
+        operation_id: operationId,
+      }, { operation_id: operationId });
+    }, 300);
+    return () => globalThis.clearTimeout(timer);
   }, [search]);
 
   useLayoutEffect(() => {

@@ -4,6 +4,7 @@ import { useVirtualWindow } from "../hooks/useVirtualWindow.js";
 import { TimelineEventCard } from "./TimelineEventCard.jsx";
 import { ConversationTypeFilter } from "./ConversationTypeFilter.jsx";
 import { JSONL_RECORD_TYPES, recordFilterType } from "../lib/conversation-types.js";
+import { browserLogger, createLogId } from "../lib/logger.js";
 
 const TIMELINE_OVERSCAN_PX = 520;
 const TIMELINE_MAX_MOUNTED_CARDS = 100;
@@ -73,10 +74,10 @@ function TimelineToolbar({
         <span>{sqlite ? "按 SQLite 记录顺序" : "按 JSONL 物理行顺序"} · {totalLines} {sqlite ? "条" : "行"} · 第 {currentPage} / {totalPages} 页</span>
       </div>
       <div className="timeline-navigation" aria-label="时间线导航">
-        <button type="button" onClick={() => onNavigateLine(1, "start")} disabled={!totalLines || pageLoading} aria-label="回到会话开始处">↑ 开始</button>
-        <button type="button" onClick={() => onNavigateLine(Math.max(1, startLine - pageSize), "start")} disabled={!totalLines || pageLoading || currentPage <= 1} aria-label="上一页">上一页</button>
-        <button type="button" onClick={() => onNavigateLine(Math.min(totalLines, startLine + pageSize), "start")} disabled={!totalLines || pageLoading || currentPage >= totalPages} aria-label="下一页">下一页</button>
-        <button type="button" onClick={() => onNavigateLine(totalLines, "end")} disabled={!totalLines || pageLoading} aria-label="跳转到会话末尾">↓ 末尾</button>
+        <button type="button" onClick={() => onNavigateLine(1, "start", false, "jump")} disabled={!totalLines || pageLoading} aria-label="回到会话开始处">↑ 开始</button>
+        <button type="button" onClick={() => onNavigateLine(Math.max(1, startLine - pageSize), "start", false, "page")} disabled={!totalLines || pageLoading || currentPage <= 1} aria-label="上一页">上一页</button>
+        <button type="button" onClick={() => onNavigateLine(Math.min(totalLines, startLine + pageSize), "start", false, "page")} disabled={!totalLines || pageLoading || currentPage >= totalPages} aria-label="下一页">下一页</button>
+        <button type="button" onClick={() => onNavigateLine(totalLines, "end", false, "jump")} disabled={!totalLines || pageLoading} aria-label="跳转到会话末尾">↓ 末尾</button>
         <form className="timeline-jump" onSubmit={onJumpSubmit}>
           <label htmlFor={ordinalInputId}>{sqlite ? "记录序号" : "原始行号"}</label>
           <input id={ordinalInputId} type="number" min="1" max={totalLines} value={jumpValue} onChange={(event) => onJumpValueChange(event.target.value)} aria-label={sqlite ? "跳转到记录序号" : "跳转到原始行号"} />
@@ -107,6 +108,7 @@ export function Timeline({
   onRevisionStale,
   source = "jsonl",
   recordTypes = JSONL_RECORD_TYPES,
+  tabId,
 }) {
   const unit = source === "sqlite" ? "条" : "行";
   const [hiddenTypes, setHiddenTypes] = useState(() => new Set());
@@ -243,7 +245,7 @@ export function Timeline({
         setFindStatus(`第 ${pendingNavigation.lineNumber} ${unit}已被类型筛选隐藏，请调整显示类型。`);
       } else if (!pendingNavigation.pageRequested && onNavigateLine) {
         pendingNavigationRef.current = { ...pendingNavigation, pageRequested: true };
-        void onNavigateLine(pendingNavigation.lineNumber);
+        void onNavigateLine(pendingNavigation.lineNumber, { operationId: pendingNavigation.operationId });
       }
     }
 
@@ -343,17 +345,30 @@ export function Timeline({
     updateReadingState(entryId, (current) => ({ ...current, bodyCursor }));
   }, [updateReadingState]);
 
-  const navigateLine = useCallback((lineNumber, align = "start", moveFocus = false) => {
+  const navigateLine = useCallback((lineNumber, align = "start", moveFocus = false, action, actionOperationId) => {
     if (!Number.isSafeInteger(lineNumber) || lineNumber < 1 || lineNumber > totalLines) return;
+    const operationId = actionOperationId ?? (action ? createLogId() : undefined);
+    const dataSource = source === "sqlite" ? "history" : "jsonl";
     const index = entries.findIndex((entry) => entry.lineNumber === lineNumber);
     if (index < 0 && pageEntries.some((entry) => entry.lineNumber === lineNumber)) {
+      if (action) browserLogger.log("browser_navigation", { action, data_source: dataSource, line: lineNumber, page: Math.floor((lineNumber - 1) / pageSize) + 1, count: totalLines, outcome: "failure", operation_id: operationId }, { operation_id: operationId, tab_id: tabId });
       pendingNavigationRef.current = null;
       pendingFocusRef.current = null;
       setFindStatus(`第 ${lineNumber} ${unit}已被类型筛选隐藏，请调整显示类型。`);
       return;
     }
+    const requiresPage = index < 0;
+    if (action) browserLogger.log("browser_navigation", {
+      action,
+      data_source: dataSource,
+      line: lineNumber,
+      page: Math.floor((lineNumber - 1) / pageSize) + 1,
+      count: totalLines,
+      outcome: requiresPage ? "dispatched" : "success",
+      operation_id: operationId,
+    }, { operation_id: operationId, tab_id: tabId });
     if (!activeRef.current) {
-      pendingNavigationRef.current = { lineNumber, align, moveFocus, pageRequested: false };
+      pendingNavigationRef.current = { lineNumber, align, moveFocus, pageRequested: false, operationId };
       if (moveFocus) pendingFocusRef.current = { lineNumber };
       return;
     }
@@ -365,13 +380,13 @@ export function Timeline({
       virtualWindow.scrollToIndex(index, align);
       return;
     }
-    pendingNavigationRef.current = { lineNumber, align, moveFocus, pageRequested: true };
-    if (onNavigateLine) void onNavigateLine(lineNumber);
-  }, [active, entries, pageEntries, onNavigateLine, totalLines, virtualWindow.scrollToIndex, unit]);
+    pendingNavigationRef.current = { lineNumber, align, moveFocus, pageRequested: true, operationId };
+    if (onNavigateLine) void onNavigateLine(lineNumber, { operationId });
+  }, [active, entries, pageEntries, onNavigateLine, pageSize, source, tabId, totalLines, virtualWindow.scrollToIndex, unit]);
 
   const scrollToEntry = useCallback((event, edge) => {
     const lineNumber = edge === "first" ? 1 : totalLines;
-    navigateLine(lineNumber, edge === "first" ? "start" : "end", true);
+    navigateLine(lineNumber, edge === "first" ? "start" : "end", true, "jump");
   }, [navigateLine, totalLines]);
 
   async function findNext(event) {
@@ -393,15 +408,28 @@ export function Timeline({
     }
     const request = ++findRequestRef.current;
     const afterLine = findCursorRef.current >= 0 ? findCursorRef.current : currentLine > 0 ? currentLine : 0;
+    const operationId = createLogId();
     const lineNumber = onSearch
-      ? await onSearch(query, afterLine)
+      ? await onSearch(query, afterLine, { operationId })
       : entries.find((entry) => hasEntryText(entry, query))?.lineNumber ?? null;
+    const dataSource = source === "sqlite" ? "history" : "jsonl";
+    browserLogger.log("browser_navigation", {
+      action: "search",
+      data_source: dataSource,
+      query_length: query.length,
+      result_count: lineNumber == null ? 0 : 1,
+      line: Number.isSafeInteger(lineNumber) ? lineNumber : undefined,
+      page: Number.isSafeInteger(lineNumber) ? Math.floor((lineNumber - 1) / pageSize) + 1 : undefined,
+      count: totalLines,
+      outcome: lineNumber === undefined ? "cancelled" : "success",
+      operation_id: operationId,
+    }, { operation_id: operationId, tab_id: tabId });
     if (request !== findRequestRef.current || lineNumber === undefined) return;
     if (lineNumber == null) setFindStatus("未找到匹配记录（区分大小写）");
     else {
       findCursorRef.current = lineNumber;
       setFindStatus(`第 ${lineNumber} / ${totalLines} ${unit}（区分大小写）`);
-      navigateLine(lineNumber, "center");
+      navigateLine(lineNumber, "center", false, undefined, operationId);
     }
   }
 
@@ -411,11 +439,19 @@ export function Timeline({
     setJumpValue(submittedOrdinal);
     const lineNumber = Number(submittedOrdinal);
     if (!Number.isInteger(lineNumber) || lineNumber < 1 || lineNumber > totalLines) {
+      const operationId = createLogId();
+      browserLogger.log("browser_navigation", {
+        action: "jump",
+        data_source: source === "sqlite" ? "history" : "jsonl",
+        count: totalLines,
+        outcome: "failure",
+        operation_id: operationId,
+      }, { operation_id: operationId, tab_id: tabId });
       setFindStatus(`请输入 1 到 ${totalLines} 之间的${source === "sqlite" ? "记录序号" : "原始行号"}`);
       return;
     }
     setFindStatus(`第 ${lineNumber} / ${totalLines} ${unit}`);
-    navigateLine(lineNumber, "start");
+    navigateLine(lineNumber, "start", false, "jump");
   }
 
   function onTimelineKeyDown(event) {
@@ -431,7 +467,7 @@ export function Timeline({
     const pageBoundary = direction > 0 ? pageEntries.at(-1)?.lineNumber : pageEntries[0]?.lineNumber;
     const nextLine = nextEntry?.lineNumber ?? Math.max(1, Math.min(totalLines, (pageBoundary ?? currentLineNumber) + direction));
     if (nextLine === currentLineNumber) return;
-    navigateLine(nextLine, "center", true);
+    navigateLine(nextLine, "center", true, "jump");
   }
 
   function onTimelineFocus(event) {
@@ -468,7 +504,17 @@ export function Timeline({
     filterProps: {
       options: recordTypes,
       hiddenTypes,
-      onChange: setHiddenTypes,
+      onChange: (nextHiddenTypes) => {
+        setHiddenTypes(nextHiddenTypes);
+        const visibleCount = pageEntries.filter((entry) => !nextHiddenTypes.has(recordFilterType(entry.filterType ?? entry.kind, recordTypes))).length;
+        const operationId = createLogId();
+        browserLogger.log("browser_filter", {
+          data_source: source === "sqlite" ? "history" : "jsonl",
+          result_count: visibleCount,
+          hidden_count: pageEntries.length - visibleCount,
+          operation_id: operationId,
+        }, { operation_id: operationId, tab_id: tabId });
+      },
       visibleCount: entries.length,
       totalCount: pageEntries.length,
       note: `筛选应用于每页展示；${source === "sqlite" ? "序号" : "行号"}、分页和原文查找仍按全部记录。`,
@@ -509,6 +555,8 @@ export function Timeline({
                   lineIndex={entry.lineNumber - 1}
                   totalEntries={totalLines}
                   sessionId={sessionId}
+                  tabId={tabId}
+                  dataSource={source === "sqlite" ? "history" : "jsonl"}
                   active={active}
                   isLast={entry.lineNumber === totalLines}
                   collapsed={readingState.collapsed}

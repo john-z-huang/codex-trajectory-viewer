@@ -5,6 +5,7 @@ import path from "node:path";
 import { previewFromRecord } from "../src/lib/rollout.js";
 import { isGuardianSession, subagentMetadataFromSession } from "./subagents.js";
 import { isJsonRecord, type JsonRecord, type Session, type SessionSummary } from "./types.js";
+import type { AppLogger, LoggerContext } from "./logger.js";
 
 const encodeId = (relativePath: string): string => Buffer.from(relativePath).toString("base64url");
 
@@ -18,13 +19,26 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-async function collectRollouts(home: string): Promise<RolloutFile[]> {
+type SkipCounts = { missing_count: number; permission_count: number; unsafe_count: number; io_count: number };
+
+function countSkip(counts: SkipCounts, error: unknown): void {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (code === "ENOENT" || code === "ENOTDIR") counts.missing_count += 1;
+  else if (code === "EACCES" || code === "EPERM") counts.permission_count += 1;
+  else counts.io_count += 1;
+}
+
+async function collectRollouts(home: string): Promise<{ files: RolloutFile[]; dirsSkipped: number; skipped: SkipCounts }> {
   const found: RolloutFile[] = [];
+  let dirsSkipped = 0;
+  const skipped: SkipCounts = { missing_count: 0, permission_count: 0, unsafe_count: 0, io_count: 0 };
   for (const [directory, archived] of [["sessions", false], ["archived_sessions", true]] as const) {
     const base = path.join(home, directory);
     try {
-      if (!(await lstat(base)).isDirectory()) continue;
-    } catch {
+      if (!(await lstat(base)).isDirectory()) { dirsSkipped += 1; skipped.unsafe_count += 1; continue; }
+    } catch (error) {
+      dirsSkipped += 1;
+      countSkip(skipped, error);
       continue;
     }
 
@@ -32,7 +46,9 @@ async function collectRollouts(home: string): Promise<RolloutFile[]> {
       let entries;
       try {
         entries = await readdir(current, { withFileTypes: true });
-      } catch {
+      } catch (error) {
+        dirsSkipped += 1;
+        countSkip(skipped, error);
         return;
       }
       for (const entry of entries) {
@@ -46,7 +62,7 @@ async function collectRollouts(home: string): Promise<RolloutFile[]> {
 
     await walk(base);
   }
-  return found;
+  return { files: found, dirsSkipped, skipped };
 }
 
 export function mergeThreadSummary(session: Session, row: JsonRecord = {}): SessionSummary {
@@ -90,14 +106,16 @@ export function mergeThreadSummary(session: Session, row: JsonRecord = {}): Sess
   } as SessionSummary;
 }
 
-export async function discoverSessions(home: string): Promise<Session[]> {
+export async function discoverSessions(home: string, logger?: AppLogger, context?: LoggerContext): Promise<Session[]> {
   const root = await realpath(home).catch(() => path.resolve(home));
-  const files = await collectRollouts(root);
+  const collected = await collectRollouts(root);
+  const files = collected.files;
   const sessions = [];
+  let filesSkipped = 0;
   for (const file of files) {
     try {
       const resolved = await realpath(file.candidate);
-      if (!resolved.startsWith(`${root}${path.sep}`)) continue;
+      if (!resolved.startsWith(`${root}${path.sep}`)) { filesSkipped += 1; collected.skipped.unsafe_count += 1; continue; }
       const info = await stat(resolved);
       const stream = createReadStream(resolved, { encoding: "utf8", start: 0, end: 128 * 1024 - 1 });
       let content = "";
@@ -147,9 +165,13 @@ export async function discoverSessions(home: string): Promise<Session[]> {
         _metadataTitle: stringValue(metadata?.title),
         _initialUserMessage: metadataInitialMessage,
       });
-    } catch {
+    } catch (error) {
       // Unreadable files are skipped; discovered files remain strictly allowlisted.
+      filesSkipped += 1;
+      countSkip(collected.skipped, error);
     }
   }
-  return sessions.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const sorted = sessions.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  logger?.emit("discovery_complete", { sessions: sorted.length, dirs_skipped: collected.dirsSkipped, files_skipped: filesSkipped, ...collected.skipped }, context);
+  return sorted;
 }

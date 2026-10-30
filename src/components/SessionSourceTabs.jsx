@@ -1,11 +1,12 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
+import { browserLogger, createLogId } from "../lib/logger.js";
 
 const SOURCES = [
   { id: "jsonl", label: "JSONL 轨迹" },
   { id: "sqlite", label: "SQLite 历史" },
 ];
 
-export function SessionSourceTabs({ active = true, jsonl, sqlite }) {
+export function SessionSourceTabs({ active = true, tabId, jsonl, sqlite }) {
   const [selectedSource, setSelectedSource] = useState("jsonl");
   const id = useId();
   const savedScrollTops = useRef(new Map());
@@ -13,6 +14,13 @@ export function SessionSourceTabs({ active = true, jsonl, sqlite }) {
 
   function selectSource(source, event) {
     if (source === selectedSource) return;
+    const operationId = createLogId();
+    browserLogger.log("browser_source", {
+      action: "switch",
+      data_source: source,
+      tab_id: tabId,
+      operation_id: operationId,
+    }, { operation_id: operationId, tab_id: tabId });
     const scrollPanel = event.currentTarget.closest(".session-tab-panel");
     if (scrollPanel) savedScrollTops.current.set(selectedSource, scrollPanel.scrollTop);
     setSelectedSource(source);

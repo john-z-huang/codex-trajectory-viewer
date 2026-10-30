@@ -38,13 +38,13 @@ test("时间线按物理行恢复分页阅读状态，修订时只清原文偏�
       content: [{ type: "output_text", text: fullMarkdown }],
     },
   });
-  const fetchSyntheticView = async (input) => {
+  const fetchSyntheticView = async (input, options = {}) => {
     const url = new URL(input, "http://localhost/");
     const params = url.searchParams;
     const view = params.get("view");
     const line = Number(params.get("line"));
     const offset = Number(params.get("offset") ?? 0);
-    rawRequests.push({ view, line, offset, revision: params.get("revision") });
+    rawRequests.push({ view, line, offset, revision: params.get("revision"), operationId: options.headers?.["X-Operation-Id"] });
     if (view === "raw") {
       if (nextRawResponse) {
         const response = nextRawResponse;
@@ -180,7 +180,14 @@ test("时间线按物理行恢复分页阅读状态，修订时只清原文偏�
       rawDownload.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
     });
     assert.equal(nativeDownloadClick.defaultPrevented, true, "validate the version before handing the URL to the browser");
-    assert.deepEqual(nativeDownloads, [{ href: rawDownload.getAttribute("href"), download: "rollout-line-65.txt" }]);
+    assert.equal(nativeDownloads.length, 1);
+    assert.equal(nativeDownloads[0].download, "rollout-line-65.txt");
+    const dispatchedUrl = new URL(nativeDownloads[0].href, "http://localhost/");
+    const downloadOperation = dispatchedUrl.searchParams.get("operation_id");
+    assert.match(downloadOperation, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    dispatchedUrl.searchParams.delete("operation_id");
+    assert.equal(dispatchedUrl.href, new URL(rawDownload.getAttribute("href"), "http://localhost/").href);
+    assert.equal(rawRequests.filter((request) => request.view === "raw" && request.line === 65).at(-1).operationId, downloadOperation, "native download and bounded precheck share a non-content operation ID");
     assert.equal(rawRequests.filter((request) => request.view === "raw" && request.line === 65).length, 2, "duplicate clicks share one bounded check after the initial raw read");
     assert.equal(rawRequests.some((request) => request.view === "download"), false);
 

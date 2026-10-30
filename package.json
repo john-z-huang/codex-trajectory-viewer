@@ -14,7 +14,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "build": "npm run build:server && vite build",
     "start": "node server-dist/index.js",
-    "test": "npm run build:server && node --test"
+    "test": "npm run build:server && node --test --test-concurrency=1 test/*.test.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
