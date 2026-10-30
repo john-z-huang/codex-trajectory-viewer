@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { RolloutReaderStore, ROLLOUT_INDEX_CACHE_MAX_FILES, ROLLOUT_INDEX_CACHE_MAX_LOGICAL_BYTES } from "../server-dist/rollout-reader.js";
 import { subagentActivityFromRollout } from "../server-dist/subagents.js";
 import { createAppServer } from "../server-dist/index.js";
+import { createServer as createViteServer } from "vite";
 
 async function createRolloutHome(t, prefix = "codex-viewer-reader-") {
   const home = await mkdtemp(path.join(os.tmpdir(), prefix));
@@ -21,6 +22,47 @@ async function listen(app) {
   await new Promise((resolve) => app.listen(0, "127.0.0.1", resolve));
   return `http://127.0.0.1:${app.address().port}`;
 }
+
+test("download checks expose stale versions and preserve streamed bytes through the Vite proxy", async (t) => {
+  const { home, directory } = await createRolloutHome(t);
+  const file = path.join(directory, "download-proxy.jsonl");
+  const meta = JSON.stringify({ type: "session_meta", payload: { id: "synthetic-download-proxy" } });
+  const row = JSON.stringify({ text: "合成🌈".repeat(30_000) });
+  const contents = `${meta}\n${row}\n`;
+  await writeFile(file, contents);
+  const app = createAppServer({ home });
+  const apiBase = await listen(app);
+  t.after(() => new Promise((resolve) => app.close(resolve)));
+  const vite = await createViteServer({
+    server: { host: "127.0.0.1", port: 0, ws: false, proxy: { "/api": apiBase } },
+    logLevel: "silent",
+  });
+  t.after(() => vite.close());
+  await vite.listen();
+  const base = `http://127.0.0.1:${vite.httpServer.address().port}`;
+  const [session] = await (await fetch(`${base}/api/sessions`)).json();
+  const window = await (await fetch(`${base}/api/sessions/${session.id}?view=window`)).json();
+  const url = (view, revision) => `${base}/api/sessions/${session.id}?view=${view}&revision=${encodeURIComponent(revision)}&line=2`;
+
+  for (const revision of ["a".repeat(64), `${window.rollout.revision.slice(0, -1)}x`]) {
+    for (const view of ["raw", "download"]) {
+      const response = await fetch(url(view, revision));
+      assert.equal(response.status, 409);
+      assert.equal((await response.json()).code, "revision_mismatch");
+    }
+  }
+  await appendFile(file, "new synthetic row\n");
+  const before = await readFile(file);
+  const check = await fetch(url("raw", window.rollout.revision));
+  assert.equal(check.status, 200);
+  const chunk = await check.json();
+  assert.ok(Buffer.byteLength(chunk.raw) <= 16 * 1024);
+  const download = await fetch(url("download", window.rollout.revision));
+  assert.equal(download.status, 200);
+  assert.match(download.headers.get("content-disposition"), /attachment/);
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()), Buffer.from(row));
+  assert.deepEqual(await readFile(file), before, "checking and downloading never alter the synthetic source");
+});
 
 function createDatabase(file, sql) {
   const database = new DatabaseSync(file);

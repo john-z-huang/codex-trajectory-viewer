@@ -184,6 +184,8 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
   const [error, setError] = useState("");
   const [manualOffset, setManualOffset] = useState(String(offset));
   const requestRef = useRef(null);
+  const downloadRequestRef = useRef(null);
+  const [checkingDownload, setCheckingDownload] = useState(false);
   const locator = entry.originalLocator;
   const local = Object.hasOwn(entry, "rawValue");
   const localBytes = useMemo(() => local ? new TextEncoder().encode(JSON.stringify(entry.rawValue, null, 2)) : null, [local, entry.rawValue]);
@@ -254,7 +256,59 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
 
   useLayoutEffect(() => {
     requestRef.current?.task?.setPriority(active ? 1 : 0);
+    downloadRequestRef.current?.task?.setPriority(active ? 1 : 0);
   }, [active]);
+
+  useLayoutEffect(() => {
+    setCheckingDownload(false);
+    return () => {
+      const pending = downloadRequestRef.current;
+      downloadRequestRef.current = null;
+      pending?.controller.abort();
+      pending?.task.cancel();
+    };
+  }, [sessionId, entry.lineNumber, locator?.revision, localBytes]);
+
+  async function downloadOriginal(event) {
+    if (local) return;
+    event.preventDefault();
+    if (downloadRequestRef.current) return;
+    const href = event.currentTarget.getAttribute("href");
+    const filename = event.currentTarget.download;
+    const controller = new AbortController();
+    const token = Symbol("download check");
+    const isCurrent = () => !controller.signal.aborted && downloadRequestRef.current?.token === token;
+    setError("");
+    setCheckingDownload(true);
+    const task = enqueueSessionView(sessionId, {
+      view: "raw", revision: locator.revision, line: entry.lineNumber, offset: 0,
+    }, { signal: controller.signal, priority: active ? 1 : 0, isCurrent });
+    downloadRequestRef.current = { controller, task, token };
+    try {
+      const value = await task.promise;
+      if (!isCurrent() || value === STALE_SESSION_RESPONSE) return;
+      // Validate with a bounded read; leave the full response to the browser.
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filename;
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } catch (reason) {
+      if (!isCurrent() || reason?.name === "AbortError") return;
+      if (isStaleRevision(reason)) {
+        setError("轨迹版本已变化，请点击「刷新」后重新下载原文。");
+        void onRevisionStale?.(entry.lineNumber, locator.revision);
+      } else {
+        setError(reason?.message || "原文下载检查失败，请重试。");
+      }
+    } finally {
+      if (isCurrent()) {
+        downloadRequestRef.current = null;
+        setCheckingDownload(false);
+      }
+    }
+  }
 
   function submitOffset(event) {
     event.preventDefault();
@@ -288,8 +342,10 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
         {(!local || downloadUrl) && <a
           href={local ? downloadUrl : sessionViewUrl(sessionId, { view: "download", revision: locator.revision, line: entry.lineNumber })}
           download={local ? `sqlite-record-${entry.lineNumber}.json` : `rollout-line-${entry.lineNumber}.txt`}
+          onClick={downloadOriginal}
+          aria-disabled={checkingDownload || undefined}
         >
-          下载完整原文
+          {checkingDownload ? "正在检查下载…" : "下载完整原文"}
         </a>}
       </div>
       {loading && <p role="status">正在读取原文片段…</p>}
