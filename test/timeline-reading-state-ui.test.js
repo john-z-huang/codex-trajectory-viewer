@@ -22,6 +22,13 @@ test("时间线按物理行恢复分页阅读状态，修订时只清原文偏�
   const window = new Window({ url: "http://localhost/" });
   const original = new Map();
   const rawRequests = [];
+  const nativeDownloads = [];
+  const staleEvents = [];
+  const onRevisionStale = (...args) => { staleEvents.push(args); };
+  let nextRawResponse = null;
+  window.HTMLAnchorElement.prototype.click = function () {
+    nativeDownloads.push({ href: this.getAttribute("href"), download: this.download });
+  };
   const fullMarkdown = `Synthetic long Markdown **bold**\n\n${"Long line content with emoji 😀 and 中文.\n\n".repeat(2200)}`;
   const downloadedLine = JSON.stringify({
     type: "response_item",
@@ -39,6 +46,11 @@ test("时间线按物理行恢复分页阅读状态，修订时只清原文偏�
     const offset = Number(params.get("offset") ?? 0);
     rawRequests.push({ view, line, offset, revision: params.get("revision") });
     if (view === "raw") {
+      if (nextRawResponse) {
+        const response = nextRawResponse;
+        nextRawResponse = null;
+        return await response;
+      }
       const byteLength = 50_000;
       const nextOffset = Math.min(offset + 16 * 1024, byteLength);
       return {
@@ -113,6 +125,7 @@ test("时间线按物理行恢复分页阅读状态，修订时只清原文偏�
       entries,
       sessionId: "synthetic-session",
       rollout: { revision, totalLines: 65, pageSize: 32, startLine },
+      onRevisionStale,
     }));
 
     await act(async () => {
@@ -162,8 +175,13 @@ test("时间线按物理行恢复分页阅读状态，修订时只清原文偏�
     assert.match(rawDownload?.getAttribute("href") ?? "", /view=download.*line=65/);
     assert.match(oversizedCard.querySelector(".event-raw-download-note")?.textContent ?? "", /版本变化时，请刷新后重试/);
     const nativeDownloadClick = new window.MouseEvent("click", { bubbles: true, cancelable: true });
-    rawDownload.dispatchEvent(nativeDownloadClick);
-    assert.equal(nativeDownloadClick.defaultPrevented, false, "the native download link is not intercepted to create a JavaScript Blob");
+    await act(async () => {
+      rawDownload.dispatchEvent(nativeDownloadClick);
+      rawDownload.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    assert.equal(nativeDownloadClick.defaultPrevented, true, "validate the version before handing the URL to the browser");
+    assert.deepEqual(nativeDownloads, [{ href: rawDownload.getAttribute("href"), download: "rollout-line-65.txt" }]);
+    assert.equal(rawRequests.filter((request) => request.view === "raw" && request.line === 65).length, 2, "duplicate clicks share one bounded check after the initial raw read");
     assert.equal(rawRequests.some((request) => request.view === "download"), false);
 
     await act(async () => {
@@ -212,6 +230,36 @@ test("时间线按物理行恢复分页阅读状态，修订时只清原文偏�
     assert.equal(rawRequests.filter((request) => request.view === "raw" && request.line === 33).at(-1)?.offset, 0, "a raw offset from the previous revision is never sent to the new content");
     assert.equal(rawRequests.filter((request) => request.view === "raw" && request.line === 33 && request.revision === "revision-2").at(-1)?.offset, 0);
     assert.equal([...restoredCard.querySelectorAll(".event-raw-toolbar button")].find((button) => button.textContent === "上一片")?.disabled, true, "revision change clears raw offset history");
+
+    const clickDownload = async () => act(async () => {
+      restoredCard.querySelector('a[download]').dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    nextRawResponse = { ok: false, status: 409, json: async () => ({ error: "Synthetic expired version", code: "revision_mismatch" }) };
+    await clickDownload();
+    assert.match(restoredCard.querySelector('[role="alert"]')?.textContent ?? "", /版本已变化.*刷新/);
+    assert.equal(nativeDownloads.length, 1, "stale versions never start a failing browser download");
+    assert.deepEqual(staleEvents, [[33, "revision-2"]]);
+
+    nextRawResponse = { ok: false, status: 404, json: async () => ({ error: "Synthetic session not found" }) };
+    await clickDownload();
+    assert.match(restoredCard.querySelector('[role="alert"]')?.textContent ?? "", /Synthetic session not found/);
+    assert.equal(nativeDownloads.length, 1, "server errors are displayed in the page");
+
+    nextRawResponse = Promise.reject(new TypeError("Synthetic network failure"));
+    await clickDownload();
+    assert.match(restoredCard.querySelector('[role="alert"]')?.textContent ?? "", /Synthetic network failure/);
+    assert.equal(nativeDownloads.length, 1);
+    await clickDownload();
+    assert.equal(nativeDownloads.length, 2, "retry after a transient failure hands the original URL to the browser");
+    assert.equal(restoredCard.querySelector('[role="alert"]'), null);
+
+    let finishCheck;
+    nextRawResponse = new Promise((resolve) => { finishCheck = resolve; });
+    await clickDownload();
+    assert.equal(restoredCard.querySelector('a[download]').getAttribute("aria-disabled"), "true");
+    await act(async () => renderPage(primaryRoot, [makeEntry(33, "revision-3", line33Text)], "revision-3", 33));
+    await act(async () => finishCheck({ ok: true, status: 200, json: async () => ({ raw: "synthetic" }) }));
+    assert.equal(nativeDownloads.length, 2, "switching versions cancels a pending check without downloading the old version");
   } finally {
     if (primaryRoot) await act(async () => primaryRoot.unmount());
     if (secondRoot) await act(async () => secondRoot.unmount());
