@@ -5,6 +5,7 @@ export function SessionPanel({
   sessionId,
   panelId = sessionId,
   refreshVersion,
+  operationId,
   active = false,
   onRequestStart,
   onRequestSettled,
@@ -30,6 +31,7 @@ export function SessionPanel({
   } = useSessionDetail(sessionId, refreshVersion, {
     panelId,
     active,
+    operationId,
     onRequestStart,
     onRequestSettled,
   });
@@ -56,6 +58,7 @@ export function SessionPanel({
       )}
       <SessionDetail
         detail={detail}
+        tabId={panelId}
         timeline={entries}
         rollout={rollout}
         currentLine={currentLine}

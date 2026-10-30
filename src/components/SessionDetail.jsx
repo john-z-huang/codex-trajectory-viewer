@@ -6,6 +6,7 @@ import { Timeline } from "./Timeline.jsx";
 
 export function SessionDetail({
   detail,
+  tabId,
   timeline,
   rollout,
   currentLine,
@@ -93,6 +94,7 @@ export function SessionDetail({
 
       <SessionSourceTabs
         active={active}
+        tabId={tabId}
         jsonl={(sourceActive) => (
           <Timeline
             entries={timeline}
@@ -101,6 +103,7 @@ export function SessionDetail({
             pageLoading={pageLoading}
             searchLoading={searchLoading}
             sessionId={detail.id}
+            tabId={tabId}
             active={sourceActive}
             onNavigateLine={onNavigateLine}
             onSearch={onSearch}
@@ -116,6 +119,7 @@ export function SessionDetail({
             onLoadHistoryPage={onLoadHistoryPage}
             onSearchHistory={onSearchHistory}
             revision={detail.supplementRevision}
+            tabId={tabId}
           />
         )}
       />

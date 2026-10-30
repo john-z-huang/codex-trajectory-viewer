@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createRolloutPageCache } from "../lib/rollout-page-cache.js";
 import { projectRolloutLines } from "../lib/rollout.js";
 import { enqueueSessionView, SessionViewError, STALE_SESSION_RESPONSE } from "../lib/session-view-requests.js";
+import { createLogId } from "../lib/logger.js";
 
 function cancelRequest(ref) {
   const current = ref.current;
@@ -55,6 +56,7 @@ function projectPage(cache, sessionId, rollout, lines) {
 export function useSessionDetail(sessionId, refreshVersion, {
   panelId = sessionId,
   active = true,
+  operationId,
   onRequestStart,
   onRequestSettled,
 } = {}) {
@@ -141,14 +143,19 @@ export function useSessionDetail(sessionId, refreshVersion, {
       signal: controller.signal,
       priority: activeRef.current ? 1 : 0,
       isCurrent,
+      operationId: operationId ?? createLogId(),
+      tabId: panelId,
     });
     windowRequestRef.current = { controller, task, token };
+    let requestOutcome = "failure";
     try {
       const value = await task.promise;
-      if (!isCurrent() || value === STALE_SESSION_RESPONSE) return false;
+      if (!isCurrent() || value === STALE_SESSION_RESPONSE) { requestOutcome = "stale"; return false; }
       applyWindow(value, requestedLine, forceClear);
+      requestOutcome = value?.supplement?.some((source) => source?.available === false || source?.status === "degraded") ? "degraded" : "success";
       return true;
     } catch (reason) {
+      requestOutcome = reason?.name === "AbortError" ? "cancelled" : isStaleRevision(reason) ? "stale" : "failure";
       if (isCurrent() && reason?.name !== "AbortError") {
         setError(reason?.message || "会话读取失败");
         setLoading(false);
@@ -157,9 +164,9 @@ export function useSessionDetail(sessionId, refreshVersion, {
       return false;
     } finally {
       if (windowRequestRef.current?.token === token) windowRequestRef.current = null;
-      if (notify) callbacksRef.current.onRequestSettled?.(refreshVersion, panelId, token);
+      if (notify) callbacksRef.current.onRequestSettled?.(refreshVersion, panelId, token, requestOutcome);
     }
-  }, [applyWindow, cancelSearch, panelId, refreshVersion, sessionId]);
+  }, [applyWindow, cancelSearch, operationId, panelId, refreshVersion, sessionId]);
 
   const recoverStaleRevision = useCallback(async () => {
     cancelPage();
@@ -169,7 +176,7 @@ export function useSessionDetail(sessionId, refreshVersion, {
     return false;
   }, [cancelPage, cancelSearch]);
 
-  const loadLine = useCallback(async (line) => {
+  const loadLine = useCallback(async (line, { operationId: actionOperationId } = {}) => {
     const current = currentRolloutRef.current;
     if (!current) return false;
     const target = boundedLine(line, current.totalLines ?? 0);
@@ -207,6 +214,8 @@ export function useSessionDetail(sessionId, refreshVersion, {
       signal: controller.signal,
       priority: activeRef.current ? 1 : 0,
       isCurrent,
+      operationId: actionOperationId ?? createLogId(),
+      tabId: panelId,
     });
     pageRequestRef.current = { controller, task, token };
     try {
@@ -237,9 +246,9 @@ export function useSessionDetail(sessionId, refreshVersion, {
     } finally {
       if (pageRequestRef.current?.token === token) pageRequestRef.current = null;
     }
-  }, [cancelPage, cancelSearch, recoverStaleRevision, sessionId]);
+  }, [cancelPage, cancelSearch, panelId, recoverStaleRevision, sessionId]);
 
-  const requestSearch = useCallback(async (query, afterLine, revision, generation, operation) => {
+  const requestSearch = useCallback(async (query, afterLine, revision, generation, operation, actionOperationId) => {
     const controller = new AbortController();
     const token = Symbol("search request");
     const isCurrent = () => generationRef.current === generation
@@ -249,6 +258,8 @@ export function useSessionDetail(sessionId, refreshVersion, {
       signal: controller.signal,
       priority: activeRef.current ? 1 : 0,
       isCurrent,
+      operationId: actionOperationId,
+      tabId: panelId,
     });
     searchRequestRef.current = { controller, task, token };
     try {
@@ -259,9 +270,9 @@ export function useSessionDetail(sessionId, refreshVersion, {
     } finally {
       if (searchRequestRef.current?.token === token) searchRequestRef.current = null;
     }
-  }, [sessionId]);
+  }, [panelId, sessionId]);
 
-  const searchNext = useCallback(async (query, afterLine) => {
+  const searchNext = useCallback(async (query, afterLine, { operationId: actionOperationId } = {}) => {
     const current = currentRolloutRef.current;
     if (!current) return null;
     if (typeof query !== "string" || query.length < 1 || query.length > 256) {
@@ -278,10 +289,10 @@ export function useSessionDetail(sessionId, refreshVersion, {
     try {
       let lineNumber;
       try {
-        lineNumber = await requestSearch(query, startAfter, current.revision, generation, operation);
+        lineNumber = await requestSearch(query, startAfter, current.revision, generation, operation, actionOperationId ?? createLogId());
         if (searchOperationRef.current !== operation) return undefined;
         if (lineNumber === null && startAfter > 0) {
-          lineNumber = await requestSearch(query, 0, current.revision, generation, operation);
+          lineNumber = await requestSearch(query, 0, current.revision, generation, operation, actionOperationId ?? createLogId());
           if (searchOperationRef.current !== operation) return undefined;
         }
       } catch (reason) {
@@ -300,7 +311,7 @@ export function useSessionDetail(sessionId, refreshVersion, {
     }
   }, [cancelSearch, recoverStaleRevision, requestSearch]);
 
-  const loadHistoryPage = useCallback(async (page) => {
+  const loadHistoryPage = useCallback(async (page, { operationId: actionOperationId } = {}) => {
     if (!detail || page < 1) return;
     cancelRequest(historyRequestRef);
     const controller = new AbortController();
@@ -316,6 +327,8 @@ export function useSessionDetail(sessionId, refreshVersion, {
       signal: controller.signal,
       priority: activeRef.current ? 1 : 0,
       isCurrent,
+      operationId: actionOperationId ?? createLogId(),
+      tabId: panelId,
     });
     historyRequestRef.current = { controller, task, token };
     try {
@@ -346,9 +359,9 @@ export function useSessionDetail(sessionId, refreshVersion, {
         historyRequestRef.current = { token };
       }
     }
-  }, [detail, sessionId]);
+  }, [detail, panelId, sessionId]);
 
-  const searchHistory = useCallback(async (query, afterIndex = 0) => {
+  const searchHistory = useCallback(async (query, afterIndex = 0, { operationId: actionOperationId } = {}) => {
     if (!detail?.supplementRevision) return undefined;
     if (typeof query !== "string" || query.length < 1 || query.length > 256) return undefined;
     cancelHistorySearch();
@@ -358,7 +371,7 @@ export function useSessionDetail(sessionId, refreshVersion, {
     const isCurrent = () => generationRef.current === generation && historySearchRequestRef.current?.token === token;
     const task = enqueueSessionView(sessionId, {
       view: "history-search", q: query, afterIndex, supplementRevision: detail.supplementRevision,
-    }, { signal: controller.signal, priority: activeRef.current ? 1 : 0, isCurrent });
+    }, { signal: controller.signal, priority: activeRef.current ? 1 : 0, isCurrent, operationId: actionOperationId ?? createLogId(), tabId: panelId });
     historySearchRequestRef.current = { controller, task, token };
     setHistorySearchLoading(true);
     setError("");
@@ -378,7 +391,7 @@ export function useSessionDetail(sessionId, refreshVersion, {
         setHistorySearchLoading(false);
       }
     }
-  }, [cancelHistorySearch, detail?.supplementRevision, sessionId]);
+  }, [cancelHistorySearch, detail?.supplementRevision, panelId, sessionId]);
 
   const retry = useCallback(() => setRetryVersion((value) => value + 1), []);
 

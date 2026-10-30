@@ -5,6 +5,8 @@ import { linkSubagents, subagentActivityFromRollout } from "./subagents.js";
 import { discoverSessions, mergeThreadSummary } from "./session-discovery.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Session, SessionSummary, SubagentActivity } from "./types.js";
+import { classifySafeError, routeForRequest, type AppLogger, type LoggerContext } from "./logger.js";
+import type { SQLiteSnapshotOptions } from "./sqlite-snapshot.js";
 
 interface SessionApiOptions {
   request: IncomingMessage;
@@ -12,7 +14,10 @@ interface SessionApiOptions {
   url: URL;
   home: string;
   sqliteHome: string;
+  sqliteSnapshotRoot?: string;
   reader: RolloutReaderStore;
+  logger?: AppLogger;
+  requestContext?: LoggerContext;
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -33,17 +38,24 @@ function validRevision(url: URL): string | null {
   return revision && revision.length <= 256 ? revision : null;
 }
 
-function sendReadError(response: ServerResponse, error: unknown): void {
+function sendReadError(response: ServerResponse, error: unknown, logger?: AppLogger, context?: LoggerContext, route = "sessions_detail"): void {
   if (response.destroyed || response.writableEnded) return;
   if (error instanceof SupplementRevisionError) {
+    logger?.emit("expected_stale_snapshot", { route }, context);
     sendJson(response, 409, { error: error.message, code: "stale_revision" });
     return;
   }
   if (error instanceof RolloutReaderError) {
+    if (error.status === 409) logger?.emit("expected_stale_snapshot", { route }, context);
+    else logger?.emit("request_processing_error", { route, ...classifySafeError(error) }, context);
     sendJson(response, error.status, { error: error.message, code: error.code });
     return;
   }
-  if (error instanceof Error && error.name === "AbortError") return;
+  if (error instanceof Error && error.name === "AbortError") {
+    logger?.emit("request_cancelled", { route }, context);
+    return;
+  }
+  logger?.emit("request_processing_error", { route, ...classifySafeError(error) }, context);
   sendJson(response, 500, { error: "Unable to read rollout" });
 }
 
@@ -104,6 +116,9 @@ async function sendLineDownload(
   lineNumber: number,
   response: ServerResponse,
   signal: AbortSignal,
+  logger?: AppLogger,
+  requestContext?: LoggerContext,
+  route = "sessions_download",
 ): Promise<void> {
   const iterator = reader.streamLine(filePath, revision, lineNumber, signal)[Symbol.asyncIterator]();
   try {
@@ -121,8 +136,11 @@ async function sendLineDownload(
     }
     if (!response.destroyed) response.end();
   } catch (error) {
-    if (response.headersSent) response.destroy();
-    else sendReadError(response, error);
+    if (response.headersSent) {
+      if (error instanceof Error && error.name === "AbortError") logger?.emit("request_cancelled", { route }, requestContext);
+      else logger?.emit("request_processing_error", { route, ...classifySafeError(error) }, requestContext);
+      response.destroy(error instanceof Error ? error : undefined);
+    } else sendReadError(response, error, logger, requestContext, route);
   } finally {
     try { await iterator.return?.(undefined); } catch { /* The response is already ending. */ }
   }
@@ -133,12 +151,15 @@ async function buildSubagentProjection(
   sessions: Session[],
   activities: SubagentActivity[],
   sqliteHome: string,
+  logger?: AppLogger,
+  requestContext?: LoggerContext,
+  snapshotOptions: SQLiteSnapshotOptions = { codexHome: sqliteHome, sqliteHome },
 ) {
   const linkedSubagents = linkSubagents(parent, sessions, activities);
   const childSessions = linkedSubagents
     .map((link) => link.session)
     .filter((session): session is Session => session !== null);
-  const childThreads = await readThreadSummaries(sqliteHome, childSessions);
+  const childThreads = await readThreadSummaries(sqliteHome, childSessions, logger, requestContext, snapshotOptions);
   const subagents = linkedSubagents.map((link) => {
     if (!link.session) {
       return {
@@ -166,10 +187,12 @@ function withRolloutWarnings<T extends { summaryWarning: string | null }>(rollou
   return { ...metadata, warnings: summaryWarning ? [summaryWarning] : [] };
 }
 
-export async function handleSessionApi({ request, response, url, home, sqliteHome, reader }: SessionApiOptions): Promise<boolean> {
+export async function handleSessionApi({ request, response, url, home, sqliteHome, sqliteSnapshotRoot, reader, logger, requestContext }: SessionApiOptions): Promise<boolean> {
+  const sqliteSnapshotOptions: SQLiteSnapshotOptions = { codexHome: home, sqliteHome, tempRoot: sqliteSnapshotRoot };
+  const route = routeForRequest(url.pathname, url.searchParams.get("view"), request.method ?? "GET");
   if (url.pathname === "/api/sessions") {
-    const sessions: Session[] = await discoverSessions(home);
-    const threads = await readThreadSummaries(sqliteHome, sessions);
+    const sessions: Session[] = await discoverSessions(home, logger, requestContext);
+    const threads = await readThreadSummaries(sqliteHome, sessions, logger, requestContext, sqliteSnapshotOptions);
     const summaries: SessionSummary[] = sessions.map((session) => mergeThreadSummary(session, threads.get(String(session.sessionId))));
     const sessionsByThreadId = new Map(summaries.map((session) => [String(session.sessionId), session]));
     for (const session of summaries) {
@@ -218,19 +241,19 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
       return true;
     }
     try {
-      sendJson(response, 200, await searchSessionHistory(sqliteHome, match, revision, query, afterIndex));
-    } catch (error) { sendReadError(response, error); }
+      sendJson(response, 200, await searchSessionHistory(sqliteHome, match, revision, query, afterIndex, logger, requestContext, sqliteSnapshotOptions));
+    } catch (error) { sendReadError(response, error, logger, requestContext, route); }
     return true;
   }
   if (view === "history") {
     try {
       const revision = url.searchParams.get("supplementRevision");
       const supplement = revision === null
-        ? await readSessionSupplement(sqliteHome, match, { historyPage })
-        : (await readSessionSupplementSnapshot(sqliteHome, match, { historyPage, revision })).supplement;
+        ? await readSessionSupplement(sqliteHome, match, { historyPage }, logger, requestContext, sqliteSnapshotOptions)
+        : (await readSessionSupplementSnapshot(sqliteHome, match, { historyPage, revision }, logger, requestContext, sqliteSnapshotOptions)).supplement;
       sendJson(response, 200, { supplement, ...(revision !== null ? { historyOnly: true } : {}) });
     } catch (error) {
-      sendReadError(response, error);
+      sendReadError(response, error, logger, requestContext, route);
     }
     return true;
   }
@@ -252,11 +275,18 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
         }
         const [window, threads, { supplement, supplementRevision }] = await Promise.all([
           reader.readWindow(match._path, line, cancellation.signal),
-          readThreadSummaries(sqliteHome, [match]),
-          readSessionSupplementSnapshot(sqliteHome, match, { historyPage }),
+          readThreadSummaries(sqliteHome, [match], logger, requestContext, sqliteSnapshotOptions),
+          readSessionSupplementSnapshot(sqliteHome, match, { historyPage }, logger, requestContext, sqliteSnapshotOptions),
         ]);
         const activities = window.activities;
-        const subagents = await buildSubagentProjection(match, sessions, activities, sqliteHome);
+        if (window.rollout) logger?.emit("reader_index", {
+          line_count: window.rollout.totalLines,
+          total_bytes: window.rollout.totalBytes,
+          index_bytes: window.rollout.indexBytes,
+          stride: window.rollout.indexStride,
+          summary_complete: window.rollout.summaryComplete,
+        }, requestContext);
+        const subagents = await buildSubagentProjection(match, sessions, activities, sqliteHome, logger, requestContext, sqliteSnapshotOptions);
         sendJson(response, 200, {
           ...mergeThreadSummary(match, threads.get(String(match.sessionId))),
           supplement,
@@ -280,7 +310,15 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
           sendJson(response, 400, { error: "line must be a positive safe integer", code: "invalid_line" });
           return true;
         }
-        sendJson(response, 200, await reader.readPage(match._path, revision, line, cancellation.signal));
+        const page = await reader.readPage(match._path, revision, line, cancellation.signal);
+        logger?.emit("reader_index", {
+          line_count: page.rollout.totalLines,
+          total_bytes: page.rollout.totalBytes,
+          index_bytes: page.rollout.indexBytes,
+          stride: page.rollout.indexStride,
+          summary_complete: page.rollout.summaryComplete,
+        }, requestContext);
+        sendJson(response, 200, page);
         return true;
       }
 
@@ -291,7 +329,7 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
           return true;
         }
         if (view === "download") {
-          await sendLineDownload(reader, match._path, revision, line, response, cancellation.signal);
+          await sendLineDownload(reader, match._path, revision, line, response, cancellation.signal, logger, requestContext, route);
           return true;
         }
         const offset = queryInteger(url, "offset", 0, 0);
@@ -321,7 +359,7 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
       if (response.headersSent) {
         if (!response.destroyed) response.destroy();
       } else {
-        sendReadError(response, error);
+      sendReadError(response, error, logger, requestContext, route);
       }
       return true;
     } finally {
@@ -330,10 +368,10 @@ export async function handleSessionApi({ request, response, url, home, sqliteHom
   }
 
   const contents = await readFile(match._path, "utf8");
-  const thread = (await readThreadSummaries(sqliteHome, [match])).get(String(match.sessionId));
+  const thread = (await readThreadSummaries(sqliteHome, [match], logger, requestContext, sqliteSnapshotOptions)).get(String(match.sessionId));
   const activities = subagentActivityFromRollout(contents);
-  const subagents = await buildSubagentProjection(match, sessions, activities, sqliteHome);
-  const supplement = await readSessionSupplement(sqliteHome, match, { historyPage });
+  const subagents = await buildSubagentProjection(match, sessions, activities, sqliteHome, logger, requestContext, sqliteSnapshotOptions);
+  const supplement = await readSessionSupplement(sqliteHome, match, { historyPage }, logger, requestContext, sqliteSnapshotOptions);
   sendJson(response, 200, { ...mergeThreadSummary(match, thread), contents, supplement, subagents });
   return true;
 }

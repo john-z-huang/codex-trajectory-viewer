@@ -23,9 +23,15 @@ test("SQLite 实际复用 JSONL 卡片的分段、完整复制取消、原文、
   }
   let root;
   let vite;
+  let restoreLogger;
+  const events = [];
   try {
     vite = await createServer({ configFile: new URL("../vite.config.js", import.meta.url).pathname, server: { middlewareMode: true, hmr: false }, appType: "custom", logLevel: "error" });
     const { SqliteSupplement } = await vite.ssrLoadModule("/src/components/SqliteSupplement.jsx");
+    const { browserLogger } = await vite.ssrLoadModule("/src/lib/logger.js");
+    const previousLog = browserLogger.log;
+    browserLogger.log = (event, fields, context) => { events.push({ event, ...fields, ...context }); return false; };
+    restoreLogger = () => { browserLogger.log = previousLog; };
     const panel = window.document.createElement("section");
     panel.className = "session-tab-panel";
     Object.defineProperty(panel, "clientHeight", { value: 1000 });
@@ -44,13 +50,14 @@ test("SQLite 实际复用 JSONL 卡片的分段、完整复制取消、原文、
     let loading = false;
     let revision = "sqlite-v1";
     const requested = [];
-    const render = () => root.render(React.createElement(SqliteSupplement, {
+    const render = () => root.render(React.createElement(React.StrictMode, null, React.createElement(SqliteSupplement, {
       sources: [{ database: "thread_history_1.sqlite", available: true, tables: [{ table: "thread_items", rows, pagination: { page, pageSize: 1, totalRows: 3, hasMore: page < 3 } }] }],
-      active, revision, historyLoading: loading, onLoadHistoryPage: (next) => requested.push(next),
-    }));
+      active, revision, tabId: "11111111-1111-4111-8111-111111111111", historyLoading: loading, onLoadHistoryPage: (next) => requested.push(next),
+    })));
     const card = () => panel.querySelector(".sqlite-conversation .event-card");
     const click = async (node) => { assert.ok(node); await act(async () => { node.click(); await new Promise((resolve) => setTimeout(resolve, 0)); }); };
     await act(async () => render());
+    assert.equal(events.length, 0, "StrictMode 初次渲染不生成操作日志");
     assert.equal(card().dataset.lineNumber, "2");
     assert.equal(card().querySelectorAll(".event-controls").length, 1);
     assert.ok(card().querySelector(".event-text-fragment").textContent.length <= 16385);
@@ -66,6 +73,8 @@ test("SQLite 实际复用 JSONL 卡片的分段、完整复制取消、原文、
     }
     assert.equal(parts.join(""), JSON.stringify(row, null, 2));
     assert.equal(raw().querySelector("a[download]").getAttribute("href").startsWith("blob:"), true);
+    raw().querySelector("a[download]").addEventListener("click", (event) => event.preventDefault());
+    await click(raw().querySelector("a[download]"));
     const lastChunk = parts.at(-1);
     await click(raw().querySelector("summary"));
     assert.equal(raw().querySelector("pre"), null);
@@ -122,8 +131,18 @@ test("SQLite 实际复用 JSONL 卡片的分段、完整复制取消、原文、
     rows = [{ ...row, refreshed: "NEW_REVISION" }];
     await act(async () => render());
     assert.match(raw().querySelector(".event-raw-toolbar").textContent, /^0–/);
+    const copyEvents = events.filter((event) => event.event === "browser_copy");
+    for (const action of ["start", "success", "cancel", "failure"]) assert.ok(copyEvents.some((event) => event.action === action), action);
+    const firstCopy = copyEvents[0].operation_id;
+    assert.deepEqual(copyEvents.filter((event) => event.operation_id === firstCopy).map((event) => event.action), ["start", "success"], "StrictMode 不重复记录复制结果");
+    assert.ok(copyEvents.every((event) => event.tab_id === "11111111-1111-4111-8111-111111111111"));
+    assert.ok(events.some((event) => event.event === "browser_download" && event.action === "local_dispatch" && event.outcome === "dispatched"));
+    assert.ok(events.some((event) => event.event === "browser_raw" && event.action === "fragment"));
+    assert.ok(events.some((event) => event.event === "browser_navigation" && event.action === "jump"));
+    assert.doesNotMatch(JSON.stringify(events), /RAW_METADATA_SECRET|TAIL_SENTINEL|Synthetic complete passage|NEW_REVISION/);
   } finally {
     if (root) await act(async () => root.unmount());
+    restoreLogger?.();
     if (vite) await vite.close();
     window.happyDOM.abort();
     for (const [key, value] of original) { if (value) Object.defineProperty(globalThis, key, value); else delete globalThis[key]; }

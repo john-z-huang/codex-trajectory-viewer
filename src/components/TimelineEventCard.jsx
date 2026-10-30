@@ -4,6 +4,7 @@ import { formatDate } from "../lib/formatters.js";
 import { parseRolloutText } from "../lib/rollout.js";
 import { enqueueSessionView, sessionViewUrl, SessionViewError, STALE_SESSION_RESPONSE } from "../lib/session-view-requests.js";
 import { getTextFragment, getTextFragmentCount, isLongText } from "../lib/text-fragments.js";
+import { browserLogger, createLogId } from "../lib/logger.js";
 import MarkdownContent from "./MarkdownContent.jsx";
 import { ConversationControls } from "./ConversationControls.jsx";
 
@@ -178,7 +179,7 @@ function isStaleRevision(error) {
   return error instanceof SessionViewError && (error.status === 409 || error.code === "stale_revision");
 }
 
-function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, onRevisionStale, active = true }) {
+function RawContent({ entry, sessionId, tabId, dataSource = "jsonl", operationId, offset, offsetHistory, onOffsetChange, onRevisionStale, active = true }) {
   const [chunk, setChunk] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -225,6 +226,8 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
       signal: controller.signal,
       priority: active ? 1 : 0,
       isCurrent,
+      operationId: operationId ?? createLogId(),
+      tabId,
     });
     requestRef.current = { controller, task, token };
     task.promise
@@ -252,7 +255,7 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
       controller.abort();
       task.cancel();
     };
-  }, [entry.lineNumber, locator?.revision, offset, onRevisionStale, sessionId, localBytes]);
+  }, [entry.lineNumber, locator?.revision, offset, onRevisionStale, sessionId, localBytes, operationId, tabId]);
 
   useLayoutEffect(() => {
     requestRef.current?.task?.setPriority(active ? 1 : 0);
@@ -270,9 +273,28 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
   }, [sessionId, entry.lineNumber, locator?.revision, localBytes]);
 
   async function downloadOriginal(event) {
-    if (local) return;
+    const operationId = createLogId();
+    if (local) {
+      browserLogger.log("browser_download", {
+        action: "local_dispatch",
+        data_source: dataSource,
+        line: entry.lineNumber,
+        offset,
+        outcome: "dispatched",
+        operation_id: operationId,
+      }, { operation_id: operationId, tab_id: tabId });
+      return;
+    }
     event.preventDefault();
     if (downloadRequestRef.current) return;
+    browserLogger.log("browser_download", {
+      action: "precheck",
+      data_source: dataSource,
+      line: entry.lineNumber,
+      offset: 0,
+      outcome: "dispatched",
+      operation_id: operationId,
+    }, { operation_id: operationId, tab_id: tabId });
     const href = event.currentTarget.getAttribute("href");
     const filename = event.currentTarget.download;
     const controller = new AbortController();
@@ -282,20 +304,48 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
     setCheckingDownload(true);
     const task = enqueueSessionView(sessionId, {
       view: "raw", revision: locator.revision, line: entry.lineNumber, offset: 0,
-    }, { signal: controller.signal, priority: active ? 1 : 0, isCurrent });
+    }, { signal: controller.signal, priority: active ? 1 : 0, isCurrent, operationId, tabId });
     downloadRequestRef.current = { controller, task, token };
     try {
       const value = await task.promise;
       if (!isCurrent() || value === STALE_SESSION_RESPONSE) return;
       // Validate with a bounded read; leave the full response to the browser.
       const link = document.createElement("a");
-      link.href = href;
+      const downloadUrl = new URL(href, globalThis.location?.href ?? document.baseURI);
+      downloadUrl.searchParams.set("operation_id", operationId);
+      link.href = `${downloadUrl.pathname}${downloadUrl.search}`;
       link.download = filename;
       document.body.append(link);
       link.click();
       link.remove();
+      browserLogger.log("browser_download", {
+        action: "dispatch",
+        data_source: dataSource,
+        line: entry.lineNumber,
+        offset: 0,
+        outcome: "dispatched",
+        operation_id: operationId,
+      }, { operation_id: operationId, tab_id: tabId });
     } catch (reason) {
-      if (!isCurrent() || reason?.name === "AbortError") return;
+      if (!isCurrent() || reason?.name === "AbortError") {
+        browserLogger.log("browser_download", {
+          action: "cancel",
+          data_source: dataSource,
+          line: entry.lineNumber,
+          offset: 0,
+          outcome: "cancelled",
+          operation_id: operationId,
+        }, { operation_id: operationId, tab_id: tabId });
+        return;
+      }
+      browserLogger.log("browser_download", {
+        action: "failure",
+        data_source: dataSource,
+        line: entry.lineNumber,
+        offset: 0,
+        outcome: isStaleRevision(reason) ? "stale" : "failure",
+        operation_id: operationId,
+      }, { operation_id: operationId, tab_id: tabId });
       if (isStaleRevision(reason)) {
         setError("轨迹版本已变化，请点击「刷新」后重新下载原文。");
         void onRevisionStale?.(entry.lineNumber, locator.revision);
@@ -314,16 +364,39 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
     event.preventDefault();
     const nextOffset = Number(manualOffset);
     if (!Number.isSafeInteger(nextOffset) || nextOffset < 0 || nextOffset > (chunk?.byteLength ?? 0)) {
+      const operationId = createLogId();
+      browserLogger.log("browser_raw", { action: "fragment", data_source: dataSource, line: entry.lineNumber, outcome: "failure", operation_id: operationId }, { operation_id: operationId, tab_id: tabId });
       setError("请输入当前原文行范围内的非负字节偏移。");
       return;
     }
     setError("");
-    onOffsetChange(entry.lineNumber, nextOffset, "push");
+    const nextOperationId = createLogId();
+    browserLogger.log("browser_raw", {
+      action: "fragment",
+      data_source: dataSource,
+      line: entry.lineNumber,
+      page: chunk?.byteLength ? Math.floor(nextOffset / (64 * 1024)) + 1 : undefined,
+      offset: nextOffset,
+      outcome: "dispatched",
+      operation_id: nextOperationId,
+    }, { operation_id: nextOperationId, tab_id: tabId });
+    onOffsetChange(entry.lineNumber, nextOffset, "push", nextOperationId);
   }
 
   function goPrevious() {
     if (!offsetHistory.length) return;
-    onOffsetChange(entry.lineNumber, offsetHistory.at(-1), "back");
+    const nextOffset = offsetHistory.at(-1);
+    const operationId = createLogId();
+    browserLogger.log("browser_raw", {
+      action: "fragment",
+      data_source: dataSource,
+      line: entry.lineNumber,
+      page: chunk?.byteLength ? Math.floor(nextOffset / (64 * 1024)) + 1 : undefined,
+      offset: nextOffset,
+      outcome: "dispatched",
+      operation_id: operationId,
+    }, { operation_id: operationId, tab_id: tabId });
+    onOffsetChange(entry.lineNumber, nextOffset, "back", operationId);
   }
 
   if (!local && (!locator?.revision || !sessionId)) return <p className="warning">缺少原文定位信息。</p>;
@@ -337,7 +410,20 @@ function RawContent({ entry, sessionId, offset, offsetHistory, onOffsetChange, o
           <button type="submit" disabled={loading}>跳转</button>
         </form>
         <button type="button" onClick={goPrevious} disabled={loading || offsetHistory.length === 0}>上一片</button>
-        <button type="button" onClick={() => chunk && !chunk.done && onOffsetChange(entry.lineNumber, chunk.nextOffset, "push")} disabled={loading || !chunk || chunk.done}>下一片</button>
+        <button type="button" onClick={() => {
+          if (!chunk || chunk.done) return;
+          const operationId = createLogId();
+          browserLogger.log("browser_raw", {
+            action: "fragment",
+            data_source: dataSource,
+            line: entry.lineNumber,
+            page: Math.floor(chunk.nextOffset / (64 * 1024)) + 1,
+            offset: chunk.nextOffset,
+            outcome: "dispatched",
+            operation_id: operationId,
+          }, { operation_id: operationId, tab_id: tabId });
+          onOffsetChange(entry.lineNumber, chunk.nextOffset, "push", operationId);
+        }} disabled={loading || !chunk || chunk.done}>下一片</button>
         <span className="event-raw-download-note">轨迹版本变化时，请刷新后重试。</span>
         {(!local || downloadUrl) && <a
           href={local ? downloadUrl : sessionViewUrl(sessionId, { view: "download", revision: locator.revision, line: entry.lineNumber })}
@@ -363,6 +449,8 @@ export const TimelineEventCard = memo(function TimelineEventCard({
   lineIndex,
   totalEntries,
   sessionId,
+  tabId,
+  dataSource = "jsonl",
   active = true,
   isLast = false,
   collapsed,
@@ -387,6 +475,8 @@ export const TimelineEventCard = memo(function TimelineEventCard({
   const copyPending = useRef(false);
   const copyControllerRef = useRef(null);
   const copyTaskRef = useRef(null);
+  const rawOperationIdRef = useRef(null);
+  const copyOperationIdRef = useRef(null);
   const copySequenceRef = useRef(0);
   const highlightTimer = useRef(null);
   const bodyRef = useRef(null);
@@ -396,11 +486,31 @@ export const TimelineEventCard = memo(function TimelineEventCard({
   const safeCursor = normalizedCursor(entry, bodyCursor);
   const virtualRef = useCallback((node) => registerItem(entryId, node), [entryId, registerItem]);
   const handleBodyCursorChange = useCallback((_entryId, cursor) => {
+    const operationId = createLogId();
+    browserLogger.log("browser_navigation", {
+      action: "fragment",
+      data_source: dataSource,
+      line: entry.lineNumber,
+      page: Number.isSafeInteger(cursor?.pageIndex) ? cursor.pageIndex + 1 : undefined,
+      offset: Number.isSafeInteger(cursor?.fragmentIndex) ? cursor.fragmentIndex : undefined,
+      count: summary.pageCount,
+      outcome: "success",
+      operation_id: operationId,
+    }, { operation_id: operationId, tab_id: tabId });
     onBodyCursorChange(readingKey, cursor);
-  }, [onBodyCursorChange, readingKey]);
+  }, [dataSource, entry.lineNumber, onBodyCursorChange, readingKey, summary.pageCount, tabId]);
+
+  function recordCopy(action, outcome, count, token = copySequenceRef.current) {
+    if (token !== copySequenceRef.current) return;
+    const operationId = copyOperationIdRef.current;
+    if (!operationId) return;
+    browserLogger.log("browser_copy", { action, data_source: dataSource, count, outcome, operation_id: operationId }, { operation_id: operationId, tab_id: tabId });
+    if (action !== "start") copyOperationIdRef.current = null;
+  }
 
   useEffect(() => () => {
     if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    recordCopy("cancel", "cancelled");
     copySequenceRef.current += 1;
     copyControllerRef.current?.abort();
     copyTaskRef.current?.cancel();
@@ -417,6 +527,7 @@ export const TimelineEventCard = memo(function TimelineEventCard({
     if (copySequenceRef.current !== token) return;
     const normalized = text.replace(/\n{3,}/g, "\n\n").trim();
     if (!normalized) {
+      recordCopy("failure", "failure", 0);
       setCopyStatus("没有可复制内容");
       copyPending.current = false;
       return;
@@ -425,9 +536,15 @@ export const TimelineEventCard = memo(function TimelineEventCard({
       const clipboard = globalThis.navigator?.clipboard;
       if (!clipboard?.writeText) throw new Error("Clipboard API unavailable");
       await clipboard.writeText(normalized);
-      if (copySequenceRef.current === token) setCopyStatus("已复制");
+      if (copySequenceRef.current === token) {
+        recordCopy("success", "success", normalized.length);
+        setCopyStatus("已复制");
+      }
     } catch {
-      if (copySequenceRef.current === token) setCopyStatus("复制失败");
+      if (copySequenceRef.current === token) {
+        recordCopy("failure", "failure");
+        setCopyStatus("复制失败");
+      }
     } finally {
       if (copySequenceRef.current === token) copyPending.current = false;
     }
@@ -441,6 +558,7 @@ export const TimelineEventCard = memo(function TimelineEventCard({
   }, [copySourceEntry]);
 
   function cancelCopy() {
+    recordCopy("cancel", "cancelled");
     copySequenceRef.current += 1;
     copyControllerRef.current?.abort();
     copyTaskRef.current?.cancel();
@@ -456,9 +574,12 @@ export const TimelineEventCard = memo(function TimelineEventCard({
     copyPending.current = true;
     setCopyStatus("");
     const token = ++copySequenceRef.current;
+    copyOperationIdRef.current = createLogId();
+    recordCopy("start", "dispatched");
     if (entry.kind !== "oversized" && !entry.projectionLimited) {
       const source = copyableEntry(entry);
       if (!source) {
+        recordCopy("failure", "failure", 0);
         copyPending.current = false;
         setCopyStatus("没有可复制内容");
         return;
@@ -469,6 +590,7 @@ export const TimelineEventCard = memo(function TimelineEventCard({
 
     const locator = entry.originalLocator;
     if (!locator?.revision || !sessionId) {
+      recordCopy("failure", "failure");
       copyPending.current = false;
       setCopyStatus("缺少原文定位信息");
       return;
@@ -484,6 +606,8 @@ export const TimelineEventCard = memo(function TimelineEventCard({
       priority: active ? 1 : 0,
       responseType: "text",
       isCurrent,
+      operationId: copyOperationIdRef.current,
+      tabId,
     });
     copyControllerRef.current = controller;
     copyTaskRef.current = task;
@@ -495,12 +619,14 @@ export const TimelineEventCard = memo(function TimelineEventCard({
         const source = copyableEntry(parsed);
         if (source) setCopySourceEntry({ ...source, lineNumber: entry.lineNumber, copyToken: token });
         else {
+          recordCopy("failure", "failure", 0);
           copyPending.current = false;
           setCopyStatus("没有可复制内容");
         }
       })
       .catch((reason) => {
-        if (!isCurrent() || reason?.name === "AbortError") return;
+        if (!isCurrent() || reason?.name === "AbortError") { recordCopy("cancel", "cancelled", undefined, token); return; }
+        recordCopy("failure", isStaleRevision(reason) ? "stale" : "failure");
         copyPending.current = false;
         if (isStaleRevision(reason)) {
           setCopyStatus("轨迹版本已变化，请点击「刷新」后重试复制");
@@ -517,6 +643,8 @@ export const TimelineEventCard = memo(function TimelineEventCard({
 
   function toggleCollapse() {
     const nextCollapsed = !collapsed;
+    const operationId = createLogId();
+    browserLogger.log("browser_navigation", { action: nextCollapsed ? "collapse" : "expand", data_source: dataSource, line: entry.lineNumber, outcome: "success", operation_id: operationId }, { operation_id: operationId, tab_id: tabId });
     if (nextCollapsed) {
       if (highlightTimer.current) clearTimeout(highlightTimer.current);
       setHighlighted(true);
@@ -530,7 +658,12 @@ export const TimelineEventCard = memo(function TimelineEventCard({
   }
 
   function onRawToggle(event) {
-    onRawExpandedChange(readingKey, event.currentTarget.open);
+    const open = event.currentTarget.open;
+    if (open === Boolean(rawExpanded)) return;
+    const operationId = createLogId();
+    rawOperationIdRef.current = operationId;
+    browserLogger.log("browser_raw", { action: open ? "expand" : "collapse", data_source: dataSource, line: entry.lineNumber, offset: rawOffset, outcome: "success", operation_id: operationId }, { operation_id: operationId, tab_id: tabId });
+    onRawExpandedChange(readingKey, open);
   }
 
   return (
@@ -587,9 +720,15 @@ export const TimelineEventCard = memo(function TimelineEventCard({
               <RawContent
                 entry={entry}
                 sessionId={sessionId}
+                tabId={tabId}
+                dataSource={dataSource}
+                operationId={rawOperationIdRef.current}
                 offset={rawOffset}
                 offsetHistory={rawOffsetHistory}
-                onOffsetChange={onRawOffsetChange}
+                onOffsetChange={(key, offset, mode, operationId) => {
+                  rawOperationIdRef.current = operationId;
+                  onRawOffsetChange(key, offset, mode);
+                }}
                 onRevisionStale={onRevisionStale}
                 active={active}
               />

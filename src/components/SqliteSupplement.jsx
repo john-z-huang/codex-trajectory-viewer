@@ -5,7 +5,7 @@ import { projectSqliteTimelineRow, SQLITE_ITEM_TYPES } from "../lib/sqlite-histo
 
 const EMPTY_ROWS = Object.freeze([]);
 
-function SqliteHistoryTimeline({ table, active, historyLoading, onLoadHistoryPage, historySearchLoading, onSearchHistory, revision }) {
+function SqliteHistoryTimeline({ table, active, tabId, historyLoading, onLoadHistoryPage, historySearchLoading, onSearchHistory, revision }) {
   const rows = Array.isArray(table.rows) ? table.rows : EMPTY_ROWS;
   const pageSize = table.pagination?.pageSize ?? 50;
   const page = table.pagination?.page ?? 1;
@@ -16,14 +16,14 @@ function SqliteHistoryTimeline({ table, active, historyLoading, onLoadHistoryPag
     revision: revision ?? "sqlite", startLine, pageSize,
     totalLines: table.pagination?.totalRows ?? rows.length,
   }), [revision, startLine, pageSize, table.pagination?.totalRows, rows.length]);
-  const navigateLine = useCallback((line) => {
+  const navigateLine = useCallback((line, context) => {
     setCurrentLine(line);
     const targetPage = Math.floor((line - 1) / pageSize) + 1;
-    if (targetPage !== page) return onLoadHistoryPage?.(targetPage);
+    if (targetPage !== page) return onLoadHistoryPage?.(targetPage, context);
     return undefined;
   }, [onLoadHistoryPage, page, pageSize]);
-  const search = useCallback(async (query, afterIndex) => {
-    const result = await onSearchHistory(query, afterIndex);
+  const search = useCallback(async (query, afterIndex, context) => {
+    const result = await onSearchHistory(query, afterIndex, context);
     return result === undefined ? undefined : result.rowIndex;
   }, [onSearchHistory]);
 
@@ -32,6 +32,7 @@ function SqliteHistoryTimeline({ table, active, historyLoading, onLoadHistoryPag
       entries={entries}
       rollout={rollout}
       currentLine={currentLine}
+      tabId={tabId}
       active={active}
       pageLoading={historyLoading}
       searchLoading={historySearchLoading}
@@ -55,7 +56,7 @@ function SourceHeading({ source, title = source.database }) {
   );
 }
 
-export function SqliteSupplement({ sources, active = true, historyLoading, onLoadHistoryPage, historySearchLoading, onSearchHistory, revision }) {
+export function SqliteSupplement({ sources, active = true, tabId, historyLoading, onLoadHistoryPage, historySearchLoading, onSearchHistory, revision }) {
   const sessionSources = (sources ?? []).filter((source) => source.database !== "thread_history_1.sqlite");
   const historySources = (sources ?? []).filter((source) => source.database === "thread_history_1.sqlite");
   const rank = (source) => source.database === "state_5.sqlite" ? 0 : source.database === "goals_1.sqlite" ? 1 : 2;
@@ -87,7 +88,7 @@ export function SqliteSupplement({ sources, active = true, historyLoading, onLoa
             {source.tables?.filter((table) => table.table === "thread_items").map((table) => (
               <div key={table.table}>
                 {table.reason && <p className="source-note">{table.reason}</p>}
-                <SqliteHistoryTimeline {...{ table, active, historyLoading, onLoadHistoryPage, historySearchLoading, onSearchHistory, revision }} />
+                <SqliteHistoryTimeline {...{ table, active, tabId, historyLoading, onLoadHistoryPage, historySearchLoading, onSearchHistory, revision }} />
               </div>
             ))}
           </div>

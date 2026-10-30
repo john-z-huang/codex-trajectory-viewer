@@ -1,8 +1,10 @@
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
-import { realpath, stat } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { errorMessage, type JsonRecord, type Session } from "./types.js";
+import { type JsonRecord, type Session } from "./types.js";
+import type { AppLogger, LoggerContext } from "./logger.js";
+import { withSQLiteSnapshot, type SQLiteSnapshotOptions } from "./sqlite-snapshot.js";
 
 const DATABASES = [
   { filename: "state_5.sqlite", tables: ["threads"] },
@@ -78,10 +80,37 @@ interface DatabaseReadResult {
 interface HistorySearchQuery { query: string; afterIndex: number }
 interface HistorySearchResult { rowIndex: number | null; page: number | null; totalRows: number }
 
+function reportDatabaseError(logger: AppLogger | undefined, database: string, error: unknown, context?: LoggerContext): void {
+  if (!logger) return;
+  const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "";
+  const sqliteCode = typeof error === "object" && error !== null && "errcode" in error && typeof error.errcode === "number" ? error.errcode : undefined;
+  const sqliteBaseCode = sqliteCode === undefined ? undefined : sqliteCode & 0xff;
+  if (code === "ENOENT") logger.sourceState(database, "missing", "sqlite_unavailable");
+  else if (code === "EACCES" || code === "EPERM") logger.sourceState(database, "degraded", "sqlite_permission");
+  else if (code === "SQLITE_CORRUPT" || code === "SQLITE_NOTADB" || sqliteCode === 11 || sqliteCode === 26) logger.sourceState(database, "degraded", "sqlite_corrupt");
+  else if (["SQLITE_BUSY", "SQLITE_CANTOPEN", "ENOSPC", "EIO"].includes(code) || [5, 6, 14].includes(sqliteBaseCode ?? -1)) logger.sourceState(database, "degraded", "sqlite_unavailable");
+  else logger.sourceState(database, "degraded", "sqlite_schema");
+  void context;
+}
+
+function safeDatabaseError(error: unknown): string {
+  const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "";
+  const sqliteCode = typeof error === "object" && error !== null && "errcode" in error && typeof error.errcode === "number" ? error.errcode : undefined;
+  if (error instanceof Error && error.message === "SQLite source file escapes CODEX_SQLITE_HOME") return error.message;
+  if (code === "ENOENT") return "database not present";
+  if (code === "EACCES" || code === "EPERM") return "database access unavailable";
+  if (code === "SQLITE_BUSY") return "database changed during snapshot";
+  if (sqliteCode === 11 || sqliteCode === 26 || code === "SQLITE_CORRUPT" || code === "SQLITE_NOTADB") return "database corrupt";
+  return "database unavailable";
+}
+
 function readDatabase(
   dbPath: string, tableNames: readonly string[], wantedIds: string[], historyPage = 1,
   snapshot?: { state: DatabaseSnapshot; expected: boolean },
   search?: HistorySearchQuery,
+  databaseName?: string,
+  logger?: AppLogger,
+  context?: LoggerContext,
 ): DatabaseReadResult {
   let database: DatabaseSync | undefined;
   try {
@@ -196,10 +225,15 @@ function readDatabase(
       tables.push({ table, available: true, rows: rows.map(jsonSafe), ...(paginated ? { pagination: { page, pageSize, totalRows, hasMore: page * pageSize < totalRows } } : {}) });
     }
     database.exec("COMMIT");
+    if (databaseName) {
+      const degraded = tables.some((table) => !table.available || Boolean(table.reason));
+      logger?.sourceState(databaseName, degraded ? "degraded" : "available", degraded ? "sqlite_schema" : undefined);
+    }
     return { available: true, tables, ...(searchResult ? { search: searchResult } : {}) };
   } catch (error: unknown) {
     if (snapshot?.expected) throw new SupplementRevisionError();
-    return { available: false, tables: [], error: errorMessage(error) };
+    if (databaseName) reportDatabaseError(logger, databaseName, error, context);
+    return { available: false, tables: [], error: safeDatabaseError(error) };
   } finally {
     try { database?.close(); } catch { /* closing an unavailable connection is harmless */ }
   }
@@ -209,6 +243,9 @@ export async function readSessionSupplementSnapshot(
   sqliteHome: string,
   session: Pick<Session, "sessionId"> & { threadId?: string },
   { historyPage = 1, revision, historySearch }: { historyPage?: number; revision?: string; historySearch?: HistorySearchQuery } = {},
+  logger?: AppLogger,
+  context?: LoggerContext,
+  snapshotOptions: SQLiteSnapshotOptions = { codexHome: sqliteHome, sqliteHome },
 ): Promise<{ supplement: Array<{ database: string } & DatabaseReadResult>; supplementRevision: string }> {
   const page = Number.isSafeInteger(historyPage) ? Math.min(MAX_HISTORY_PAGE, Math.max(1, historyPage)) : 1;
   const home = await realpath(sqliteHome).catch(() => path.resolve(sqliteHome));
@@ -216,45 +253,42 @@ export async function readSessionSupplementSnapshot(
   const snapshots = revision === undefined ? DATABASES.map((): DatabaseSnapshot => ({ tables: {} })) : decodeSnapshot(revision, home, ids);
   const supplement: Array<{ database: string } & DatabaseReadResult> = [];
   for (const [i, { filename, tables }] of DATABASES.entries()) {
-    // History navigation must neither validate nor reload mutable thread/goal
-    // metadata. The browser keeps those sources from the original window.
+    // History navigation must neither validate nor reload mutable thread/goal metadata.
     if (revision !== undefined && filename !== "thread_history_1.sqlite") continue;
     const snapshot = snapshots[i];
     if (revision !== undefined && snapshot.error !== undefined) {
+      if (snapshot.error === "database not present") logger?.sourceState(filename, "missing", "sqlite_unavailable");
+      else logger?.sourceState(filename, "degraded", "sqlite_unavailable");
       supplement.push({ database: filename, available: false, tables: [], error: snapshot.error });
       continue;
     }
     try {
-      const resolved = await resolveDatabasePath(home, filename);
-      const info = await stat(resolved, { bigint: true });
-      const identity = createHash("sha256").update(`${info.dev}:${info.ino}`).digest("hex");
-      if (revision !== undefined && snapshot.identity !== identity) throw new SupplementRevisionError();
-      snapshot.identity = identity;
-      const result = readDatabase(resolved, tables, ids, page, filename === "thread_history_1.sqlite" ? { state: snapshot, expected: revision !== undefined } : undefined, filename === "thread_history_1.sqlite" ? historySearch : undefined);
-      const after = await stat(resolved, { bigint: true });
-      if (info.dev !== after.dev || info.ino !== after.ino) throw new SupplementRevisionError();
+      const { value: result } = await withSQLiteSnapshot(filename, snapshotOptions, (copyPath, identity) => {
+        if (revision !== undefined && snapshot.identity !== identity.token) throw new SupplementRevisionError();
+        snapshot.identity = identity.token;
+        return readDatabase(
+          copyPath,
+          tables,
+          ids,
+          page,
+          filename === "thread_history_1.sqlite" ? { state: snapshot, expected: revision !== undefined } : undefined,
+          filename === "thread_history_1.sqlite" ? historySearch : undefined,
+          filename,
+          logger,
+          context,
+        );
+      });
       if (!result.available) snapshot.error = result.error ?? "database unavailable";
       supplement.push({ database: filename, ...result });
     } catch (error: unknown) {
       if (error instanceof SupplementRevisionError || revision !== undefined) throw new SupplementRevisionError();
-      const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
-      snapshot.error = code === "ENOENT" ? "database not present" : errorMessage(error);
+      reportDatabaseError(logger, filename, error, context);
+      snapshot.error = safeDatabaseError(error);
       supplement.push({ database: filename, available: false, tables: [], error: snapshot.error });
     }
   }
   const payload = Buffer.from(JSON.stringify(snapshots)).toString("base64url");
   return { supplement, supplementRevision: revision ?? `${payload}.${snapshotSignature(home, ids, payload)}` };
-}
-
-function resolveDatabasePath(home: string, filename: string): Promise<string> {
-  const root = path.resolve(home);
-  const candidate = path.join(root, filename);
-  return realpath(candidate).then(async (resolved) => {
-    const info = await stat(resolved);
-    if (!info.isFile()) throw new Error("database path is not a regular file");
-    if (!resolved.startsWith(`${root}${path.sep}`)) throw new Error("database path escapes CODEX_SQLITE_HOME");
-    return resolved;
-  });
 }
 
 /** Index threads metadata for summaries, keyed only by a discovered rollout's session ID. */
@@ -264,13 +298,16 @@ export async function searchSessionHistory(
   revision: string,
   query: string,
   afterIndex = 0,
+  logger?: AppLogger,
+  context?: LoggerContext,
+  snapshotOptions: SQLiteSnapshotOptions = { codexHome: sqliteHome, sqliteHome },
 ): Promise<HistorySearchResult> {
   if (!query || query.length > 256 || !Number.isSafeInteger(afterIndex) || afterIndex < 0) {
     throw new Error("SQLite 查找文本需为 1 到 256 个 UTF-16 代码单元，起点需为非负安全整数。");
   }
   const { supplement } = await readSessionSupplementSnapshot(sqliteHome, session, {
     revision, historySearch: { query, afterIndex },
-  });
+  }, logger, context, snapshotOptions);
   const history = supplement.find((source) => source.database === "thread_history_1.sqlite");
   const items = history?.tables.find((table) => table.table === "thread_items");
   if (!history?.available || !items?.available || items.reason) {
@@ -279,33 +316,49 @@ export async function searchSessionHistory(
   return history.search ?? { rowIndex: null, page: null, totalRows: 0 };
 }
 
-export async function readThreadSummaries(sqliteHome: string, sessions: Session[]): Promise<Map<string, JsonRecord>> {
-  const result = new Map<string, JsonRecord>();
-  if (!sessions.length) return result;
-  let database: DatabaseSync | undefined;
+export async function readThreadSummaries(
+  sqliteHome: string,
+  sessions: Session[],
+  logger?: AppLogger,
+  context?: LoggerContext,
+  snapshotOptions: SQLiteSnapshotOptions = { codexHome: sqliteHome, sqliteHome },
+): Promise<Map<string, JsonRecord>> {
+  if (sessions.length === 0) return new Map();
+  const fallback = new Map<string, JsonRecord>();
   try {
-    const home = await realpath(sqliteHome).catch(() => path.resolve(sqliteHome));
-    const dbPath = await resolveDatabasePath(home, "state_5.sqlite");
-    database = new DatabaseSync(dbPath, { readOnly: true, enableForeignKeyConstraints: false });
-    const exists = database.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ?").get("threads");
-    if (!exists) return result;
-    const columns = database.prepare(`PRAGMA table_info(${quoteIdentifier("threads")})`).all().map((row) => String(row.name));
-    const keyColumn = columns.find((column) => THREAD_KEYS.includes(column)) ?? columns.find((column) => column === "id");
-    if (!keyColumn) return result;
-    const accepted = ["name", "title", "preview", "first_user_message", "cwd", "model", "tokens_used", "source", "archived", "updated_at", "updated_at_ms"];
-    const selected = [...new Set([keyColumn, ...accepted.filter((column) => columns.includes(column))])];
-    const ids = [...new Set(sessions.map((session) => session.sessionId).filter((id): id is string => typeof id === "string" && id.length > 0))];
-    for (let offset = 0; offset < ids.length; offset += 400) {
-      const batch = ids.slice(offset, offset + 400);
-      const rows = database.prepare(`SELECT ${selected.map(quoteIdentifier).join(", ")} FROM ${quoteIdentifier("threads")} WHERE ${quoteIdentifier(keyColumn)} IN (${batch.map(() => "?").join(",")}) LIMIT 500`).all(...batch);
-      for (const row of rows) result.set(String(row[keyColumn]), jsonSafe(row));
-    }
-  } catch {
-    // SQLite is supplementary: missing, corrupt or newer schemas leave JSONL summaries intact.
-  } finally {
-    try { database?.close(); } catch { /* ignore close errors */ }
+    const { value } = await withSQLiteSnapshot("state_5.sqlite", snapshotOptions, (copyPath) => {
+      const result = new Map<string, JsonRecord>();
+      let database: DatabaseSync | undefined;
+      try {
+        database = new DatabaseSync(copyPath, { readOnly: true, enableForeignKeyConstraints: false });
+        const exists = database.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ?").get("threads");
+        if (!exists) { logger?.sourceState("state_5.sqlite", "degraded", "sqlite_schema"); return result; }
+        const columns = database.prepare(`PRAGMA table_info(${quoteIdentifier("threads")})`).all().map((row) => String(row.name));
+        const keyColumn = columns.find((column) => THREAD_KEYS.includes(column)) ?? columns.find((column) => column === "id");
+        if (!keyColumn) { logger?.sourceState("state_5.sqlite", "degraded", "sqlite_schema"); return result; }
+        const accepted = ["name", "title", "preview", "first_user_message", "cwd", "model", "tokens_used", "source", "archived", "updated_at", "updated_at_ms"];
+        const selected = [...new Set([keyColumn, ...accepted.filter((column) => columns.includes(column))])];
+        const ids = [...new Set(sessions.map((session) => session.sessionId).filter((id): id is string => typeof id === "string" && id.length > 0))];
+        for (let offset = 0; offset < ids.length; offset += 400) {
+          const batch = ids.slice(offset, offset + 400);
+          const rows = database.prepare(`SELECT ${selected.map(quoteIdentifier).join(", ")} FROM ${quoteIdentifier("threads")} WHERE ${quoteIdentifier(keyColumn)} IN (${batch.map(() => "?").join(",")}) LIMIT 500`).all(...batch);
+          for (const row of rows) result.set(String(row[keyColumn]), jsonSafe(row));
+        }
+        logger?.sourceState("state_5.sqlite", "available");
+        return result;
+      } catch (error) {
+        // SQLite is supplementary: missing, corrupt or newer schemas leave JSONL summaries intact.
+        reportDatabaseError(logger, "state_5.sqlite", error, context);
+        return result;
+      } finally {
+        try { database?.close(); } catch { /* ignore close errors */ }
+      }
+    });
+    return value;
+  } catch (error) {
+    reportDatabaseError(logger, "state_5.sqlite", error, context);
+    return fallback;
   }
-  return result;
 }
 
 /** Read only the three supported Codex databases. No other database is opened. */
@@ -313,18 +366,21 @@ export async function readSessionSupplement(
   sqliteHome: string,
   session: Pick<Session, "sessionId"> & { threadId?: string },
   { historyPage = 1 }: { historyPage?: number } = {},
+  logger?: AppLogger,
+  context?: LoggerContext,
+  snapshotOptions: SQLiteSnapshotOptions = { codexHome: sqliteHome, sqliteHome },
 ): Promise<Array<{ database: string } & DatabaseReadResult>> {
   const page = Number.isSafeInteger(historyPage) ? Math.min(MAX_HISTORY_PAGE, Math.max(1, historyPage)) : 1;
-  const home = await realpath(sqliteHome).catch(() => path.resolve(sqliteHome));
   const wantedIds = [...new Set([session.sessionId, session.threadId].filter((value): value is string => typeof value === "string" && value.length > 0))];
   const sources: Array<{ database: string } & DatabaseReadResult> = [];
   for (const database of DATABASES) {
     try {
-      const resolved = await resolveDatabasePath(home, database.filename);
-      sources.push({ database: database.filename, ...readDatabase(resolved, database.tables, wantedIds, page) });
+      const { value } = await withSQLiteSnapshot(database.filename, snapshotOptions, (copyPath) =>
+        readDatabase(copyPath, database.tables, wantedIds, page, undefined, undefined, database.filename, logger, context));
+      sources.push({ database: database.filename, ...value });
     } catch (error: unknown) {
-      const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
-      sources.push({ database: database.filename, available: false, tables: [], error: code === "ENOENT" ? "database not present" : errorMessage(error) });
+      reportDatabaseError(logger, database.filename, error, context);
+      sources.push({ database: database.filename, available: false, tables: [], error: safeDatabaseError(error) });
     }
   }
   return sources;
